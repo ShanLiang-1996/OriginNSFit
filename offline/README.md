@@ -66,7 +66,7 @@ output\fit_curves.csv
 output\figures\
 ```
 
-图中包含三角形原始数据点、指数拟合曲线、代入系数后的公式、R2，以及 `log10` 寿命横坐标。
+图中包含三角形原始数据点、幂律拟合曲线、LaTeX 风格公式 `\Delta \epsilon = a (N_f)^b`、R2，以及 `log10` 寿命横坐标。
 
 如果列名不同，可以手动指定：
 

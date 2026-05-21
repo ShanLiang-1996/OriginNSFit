@@ -95,9 +95,9 @@ class OriginClient:
     ) -> None:
         text = (
             f"{title}\n"
-            f"{response_column} = {fit.result.coefficient_a:.6g} * "
-            f"exp({fit.result.coefficient_b:.6g} * log10({life_column}))\n"
-            f"R^2 = {fit.result.r2:.5f}"
+            f"$\\Delta \\epsilon = {fit.result.coefficient_a:.6g} "
+            f"(N_f)^{{{fit.result.coefficient_b:.6g}}}$\n"
+            f"$R^2 = {fit.result.r2:.5f}$"
         )
         x_position = 10 ** (
             0.9 * self._safe_log10(fit.result.life_min)

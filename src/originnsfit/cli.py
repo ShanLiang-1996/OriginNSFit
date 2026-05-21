@@ -7,14 +7,14 @@ import re
 import pandas as pd
 
 from .data_loader import discover_files, read_table, sn_xy_columns
-from .fitting import fit_sn_exponential
+from .fitting import fit_sn_power_law
 from .origin_client import OriginAutomationError, OriginClient
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="origin-ns-fit",
-        description="Batch read S-N data, fit exponential curves, and plot with Origin.",
+        description="Batch read S-N data, fit power-law curves, and plot with Origin.",
     )
     parser.add_argument("--input", type=Path, default=Path("data"), help="Input data directory.")
     parser.add_argument("--output", type=Path, default=Path("output"), help="Output directory.")
@@ -58,7 +58,7 @@ def main(argv: list[str] | None = None) -> int:
     for path in files:
         for table in read_table(path):
             life_column, response_column = sn_xy_columns(table.frame, args.life, args.response)
-            fit = fit_sn_exponential(
+            fit = fit_sn_power_law(
                 table.frame,
                 life_column,
                 response_column,
@@ -81,7 +81,7 @@ def main(argv: list[str] | None = None) -> int:
                     "life_column": life_column,
                     "response_column": response_column,
                     "points": fit.result.points,
-                    "model": "response = a * exp(b * log10(life))",
+                    "model": "response = a * life^b",
                     "coefficient_a": fit.result.coefficient_a,
                     "coefficient_b": fit.result.coefficient_b,
                     "r2": fit.result.r2,
