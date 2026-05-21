@@ -58,14 +58,14 @@ class OriginClient:
 
         if data_plot is not None:
             data_plot.symbol_kind = symbol_kind
-            data_plot.symbol_size = 12
+            data_plot.symbol_size = 15
             data_plot.symbol_interior = 1
-            data_plot.set_cmd("-c 1", "-w 2")
+            data_plot.set_cmd("-c 1", "-w 1500")
         if fit_plot is not None:
-            fit_plot.set_cmd("-c 2", "-w 3")
+            fit_plot.set_cmd("-c 2", "-w 1000")
 
         layer.xscale = "log10"
-        layer.yscale = "log10"
+        layer.yscale = "linear"
         layer.rescale()
         self._style_grid(layer)
         self._set_axis_labels(layer, life_column, response_column)
@@ -85,7 +85,7 @@ class OriginClient:
             x_label.text = f"{life_column} (log10)"
         y_label = layer.label("yl")
         if y_label is not None:
-            y_label.text = f"{response_column} (log10)"
+            y_label.text = response_column
 
     def _style_grid(self, layer) -> None:
         layer.lt_exec(
@@ -114,9 +114,8 @@ class OriginClient:
             0.9 * self._safe_log10(fit.result.life_min)
             + 0.1 * self._safe_log10(fit.result.life_max)
         )
-        y_position = 10 ** (
-            0.8 * self._safe_log10(fit.result.response_min)
-            + 0.2 * self._safe_log10(fit.result.response_max)
+        y_position = fit.result.response_min + 0.24 * (
+            fit.result.response_max - fit.result.response_min
         )
         label = layer.add_label(text, x_position, y_position)
         if label is not None:

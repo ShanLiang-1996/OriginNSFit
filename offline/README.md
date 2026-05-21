@@ -67,7 +67,7 @@ output\fit_lines.csv
 output\figures\
 ```
 
-图中包含三角形原始数据点、幂律拟合线、渲染后的 `\Delta \epsilon = a (N_f)^b` 公式、R2、主/次网格线，以及 `log10` 寿命横坐标和 `log10` 响应纵坐标。
+图中包含三角形原始数据点、幂律拟合线、渲染后的 `\Delta \epsilon = a (N_f)^b` 公式、R2、网格线，以及 `log10` 寿命横坐标和线性响应纵坐标。
 
 如果列名不同，可以手动指定：
 
