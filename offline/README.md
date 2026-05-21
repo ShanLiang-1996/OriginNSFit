@@ -1,6 +1,6 @@
 # OriginNSFit 离线部署包
 
-这个目录用于在不能联网的 Windows 电脑上部署 OriginNSFit。
+这个目录用于在不能联网的 Windows 电脑上部署 OriginNSFit，并运行 S-N 曲线批量拟合和 Origin 绘图。
 
 ## 适用环境
 
@@ -37,28 +37,41 @@ python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install --no-index --find-links .\offline\wheelhouse --no-build-isolation --no-deps -e .
 ```
 
-验证：
+## 验证拟合
+
+只拟合并输出 CSV，不启动 Origin：
 
 ```powershell
-.\.venv\Scripts\python.exe -m originnsfit --input examples --output output --pattern "*.csv" --dry-run
+.\.venv\Scripts\python.exe -m originnsfit --input examples --output output --pattern example.csv --dry-run
+```
+
+成功后会生成：
+
+```text
+output\fit_summary.csv
+output\fit_curves.csv
 ```
 
 ## 真实连接 Origin
 
-确认 dry-run 成功后，把测试命令中的 `--dry-run` 去掉：
+确认 dry-run 成功后，把数据放到 `data/`，并去掉 `--dry-run`：
 
 ```powershell
 .\.venv\Scripts\python.exe -m originnsfit --input data --output output --pattern "*.csv"
 ```
 
-如果 Origin 自动化失败，优先检查：
+每组试验会单独拟合并导出 Origin 图：
 
-- Origin / OriginPro 是否已安装并能正常启动。
-- Python 和 Origin 的位数是否一致，建议都使用 64 位。
-- 是否安装了 `originpro` 和 `OriginExt`，可用下面命令检查：
+```text
+output\figures\
+```
+
+图中包含三角形原始数据点、指数拟合曲线、代入系数后的公式、R2，以及 `log10` 寿命横坐标。
+
+如果列名不同，可以手动指定：
 
 ```powershell
-.\.venv\Scripts\python.exe -m pip show originpro OriginExt originpy
+.\.venv\Scripts\python.exe -m originnsfit --input data --output output --life "N" --response "S"
 ```
 
 ## 离线打包 exe
