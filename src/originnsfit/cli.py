@@ -53,6 +53,7 @@ def main(argv: list[str] | None = None) -> int:
 
     summaries: list[dict[str, object]] = []
     curves: list[pd.DataFrame] = []
+    lines: list[dict[str, object]] = []
     plot_jobs: list[dict[str, object]] = []
 
     for path in files:
@@ -71,6 +72,22 @@ def main(argv: list[str] | None = None) -> int:
             curve.insert(1, "sheet", table.sheet or "")
             curve.insert(2, "group", table.group or "")
             curves.append(curve)
+            lines.append(
+                {
+                    "file": str(path),
+                    "sheet": table.sheet or "",
+                    "group": table.group or "",
+                    "life_column": life_column,
+                    "response_column": response_column,
+                    "log10_intercept": fit.result.log10_intercept,
+                    "log10_slope": fit.result.log10_slope,
+                    "log10_formula": fit.result.log10_formula,
+                    "life_start": fit.result.life_min,
+                    "response_start": fit.result.fit_response_at_life_min,
+                    "life_end": fit.result.life_max,
+                    "response_end": fit.result.fit_response_at_life_max,
+                }
+            )
 
             summary_index = len(summaries)
             summaries.append(
@@ -84,13 +101,18 @@ def main(argv: list[str] | None = None) -> int:
                     "model": "response = a * life^b",
                     "coefficient_a": fit.result.coefficient_a,
                     "coefficient_b": fit.result.coefficient_b,
+                    "log10_intercept": fit.result.log10_intercept,
+                    "log10_slope": fit.result.log10_slope,
                     "r2": fit.result.r2,
                     "rmse": fit.result.rmse,
                     "life_min": fit.result.life_min,
                     "life_max": fit.result.life_max,
+                    "fit_response_at_life_min": fit.result.fit_response_at_life_min,
+                    "fit_response_at_life_max": fit.result.fit_response_at_life_max,
                     "response_min": fit.result.response_min,
                     "response_max": fit.result.response_max,
                     "formula": fit.result.formula,
+                    "log10_formula": fit.result.log10_formula,
                     "figure": "",
                 }
             )
@@ -134,9 +156,12 @@ def main(argv: list[str] | None = None) -> int:
     curves_path = output_dir / "fit_curves.csv"
     if curves:
         pd.concat(curves, ignore_index=True).to_csv(curves_path, index=False, encoding="utf-8-sig")
+    lines_path = output_dir / "fit_lines.csv"
+    pd.DataFrame(lines).to_csv(lines_path, index=False, encoding="utf-8-sig")
     print(f"Wrote {summary_path}")
     if curves:
         print(f"Wrote {curves_path}")
+    print(f"Wrote {lines_path}")
     return 0
 
 

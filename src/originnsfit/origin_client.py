@@ -58,14 +58,16 @@ class OriginClient:
 
         if data_plot is not None:
             data_plot.symbol_kind = symbol_kind
-            data_plot.symbol_size = 9
+            data_plot.symbol_size = 12
             data_plot.symbol_interior = 1
-            data_plot.set_cmd("-c 1")
+            data_plot.set_cmd("-c 1", "-w 2")
         if fit_plot is not None:
-            fit_plot.set_cmd("-c 2", "-w 2")
+            fit_plot.set_cmd("-c 2", "-w 3")
 
         layer.xscale = "log10"
+        layer.yscale = "log10"
         layer.rescale()
+        self._style_grid(layer)
         self._set_axis_labels(layer, life_column, response_column)
         self._add_formula_label(layer, fit, life_column, response_column, title)
 
@@ -83,7 +85,21 @@ class OriginClient:
             x_label.text = f"{life_column} (log10)"
         y_label = layer.label("yl")
         if y_label is not None:
-            y_label.text = response_column
+            y_label.text = f"{response_column} (log10)"
+
+    def _style_grid(self, layer) -> None:
+        layer.lt_exec(
+            "layer.x.grid.show=3;"
+            "layer.y.grid.show=3;"
+            "layer.x.grid.majorcolor=18;"
+            "layer.y.grid.majorcolor=18;"
+            "layer.x.grid.minorcolor=19;"
+            "layer.y.grid.minorcolor=19;"
+            "layer.x.grid.majorstyle=2;"
+            "layer.y.grid.majorstyle=2;"
+            "layer.x.grid.minorstyle=3;"
+            "layer.y.grid.minorstyle=3"
+        )
 
     def _add_formula_label(
         self,
@@ -93,24 +109,29 @@ class OriginClient:
         response_column: str,
         title: str,
     ) -> None:
-        text = (
-            f"{title}\n"
-            f"$\\Delta \\epsilon = {fit.result.coefficient_a:.6g} "
-            f"(N_f)^{{{fit.result.coefficient_b:.6g}}}$\n"
-            f"$R^2 = {fit.result.r2:.5f}$"
-        )
+        text = self._origin_formula_text(title, fit)
         x_position = 10 ** (
             0.9 * self._safe_log10(fit.result.life_min)
             + 0.1 * self._safe_log10(fit.result.life_max)
         )
-        y_position = fit.result.response_min + 0.28 * (
-            fit.result.response_max - fit.result.response_min
+        y_position = 10 ** (
+            0.8 * self._safe_log10(fit.result.response_min)
+            + 0.2 * self._safe_log10(fit.result.response_max)
         )
         label = layer.add_label(text, x_position, y_position)
         if label is not None:
+            label.set_int("verbatim", 0)
             label.set_int("attach", 2)
             label.set_float("x1", x_position)
             label.set_float("y1", y_position)
+
+    def _origin_formula_text(self, title: str, fit: SNCurveFit) -> str:
+        return (
+            f"{title}\n"
+            f"\\x(0394)\\x(03B5) = {fit.result.coefficient_a:.6g} "
+            f"(N\\-(f))\\+({fit.result.coefficient_b:.6g})\n"
+            f"R\\+(2) = {fit.result.r2:.5f}"
+        )
 
     @staticmethod
     def _safe_log10(value: float) -> float:

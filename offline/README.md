@@ -50,6 +50,7 @@ python -m venv .venv
 ```text
 output\fit_summary.csv
 output\fit_curves.csv
+output\fit_lines.csv
 ```
 
 ## 真实连接 Origin
@@ -66,7 +67,7 @@ output\fit_curves.csv
 output\figures\
 ```
 
-图中包含三角形原始数据点、幂律拟合曲线、LaTeX 风格公式 `\Delta \epsilon = a (N_f)^b`、R2，以及 `log10` 寿命横坐标。
+图中包含三角形原始数据点、幂律拟合线、渲染后的 `\Delta \epsilon = a (N_f)^b` 公式、R2、主/次网格线，以及 `log10` 寿命横坐标和 `log10` 响应纵坐标。
 
 如果列名不同，可以手动指定：
 

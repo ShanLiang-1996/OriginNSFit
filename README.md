@@ -15,6 +15,7 @@ response = a * life^b
 ```
 
 其中 `life` 默认识别为 `寿命` 列，`response` 默认识别为 `应变幅` 或 `应力幅` 列。横坐标在 Origin 图中使用 `log10` 对数坐标。
+为让幂律拟合线在图中呈直线，纵坐标也使用 `log10` 对数坐标。
 
 ## 效果图
 
@@ -63,6 +64,7 @@ python -m venv .venv
 ```text
 output/fit_summary.csv    每组拟合系数、R2、RMSE、公式和图片路径
 output/fit_curves.csv     每组拟合曲线采样点
+output/fit_lines.csv      log-log 直线斜率、截距和端点
 ```
 
 ## Origin 绘图
@@ -82,9 +84,10 @@ output/figures/
 图中包含：
 
 - 原始数据点，默认三角符号。
-- 幂律拟合曲线。
+- 幂律拟合线，log-log 坐标中显示为直线。
 - 代入拟合系数后的公式和 R2。
-- `log10` 寿命横坐标。
+- `log10` 寿命横坐标和 `log10` 响应纵坐标。
+- 主/次网格线。
 
 如果列名不同，可以手动指定：
 
