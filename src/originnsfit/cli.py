@@ -53,71 +53,81 @@ def main(argv: list[str] | None = None) -> int:
 
     summaries: list[dict[str, object]] = []
     curves: list[pd.DataFrame] = []
+    plot_jobs: list[dict[str, object]] = []
+
+    for path in files:
+        for table in read_table(path):
+            life_column, response_column = sn_xy_columns(table.frame, args.life, args.response)
+            fit = fit_sn_exponential(
+                table.frame,
+                life_column,
+                response_column,
+                fit_points=args.fit_points,
+            )
+            label = _safe_name(table.label)
+
+            curve = fit.curve.copy()
+            curve.insert(0, "file", str(path))
+            curve.insert(1, "sheet", table.sheet or "")
+            curve.insert(2, "group", table.group or "")
+            curves.append(curve)
+
+            summary_index = len(summaries)
+            summaries.append(
+                {
+                    "file": str(path),
+                    "sheet": table.sheet or "",
+                    "group": table.group or "",
+                    "life_column": life_column,
+                    "response_column": response_column,
+                    "points": fit.result.points,
+                    "model": "response = a * exp(b * log10(life))",
+                    "coefficient_a": fit.result.coefficient_a,
+                    "coefficient_b": fit.result.coefficient_b,
+                    "r2": fit.result.r2,
+                    "rmse": fit.result.rmse,
+                    "life_min": fit.result.life_min,
+                    "life_max": fit.result.life_max,
+                    "response_min": fit.result.response_min,
+                    "response_max": fit.result.response_max,
+                    "formula": fit.result.formula,
+                    "figure": "",
+                }
+            )
+            plot_jobs.append(
+                {
+                    "summary_index": summary_index,
+                    "fit": fit,
+                    "life_column": life_column,
+                    "response_column": response_column,
+                    "output_path": figures_dir / f"{label}.png",
+                    "title": table.group or table.sheet or path.stem,
+                    "label": table.label,
+                }
+            )
+
     origin = None
     if not args.dry_run:
         try:
             origin = OriginClient(visible=not args.hidden_origin).__enter__()
+            for job in plot_jobs:
+                try:
+                    figure_path = origin.plot_sn_curve(
+                        job["fit"],
+                        str(job["life_column"]),
+                        str(job["response_column"]),
+                        job["output_path"],
+                        title=str(job["title"]),
+                        symbol_kind=args.symbol_kind,
+                    )
+                    summaries[int(job["summary_index"])]["figure"] = str(figure_path)
+                except Exception as exc:
+                    print(f"Origin plotting failed for {job['label']}: {exc}")
         except OriginAutomationError as exc:
             print(f"Origin automation disabled: {exc}")
-
-    try:
-        for path in files:
-            for table in read_table(path):
-                life_column, response_column = sn_xy_columns(table.frame, args.life, args.response)
-                fit = fit_sn_exponential(
-                    table.frame,
-                    life_column,
-                    response_column,
-                    fit_points=args.fit_points,
-                )
-                label = _safe_name(table.label)
-
-                figure_path = ""
-                if origin is not None:
-                    try:
-                        figure_path = str(
-                            origin.plot_sn_curve(
-                                fit,
-                                life_column,
-                                response_column,
-                                figures_dir / f"{label}.png",
-                                title=table.group or table.sheet or path.stem,
-                                symbol_kind=args.symbol_kind,
-                            )
-                        )
-                    except Exception as exc:
-                        print(f"Origin plotting failed for {table.label}: {exc}")
-
-                curve = fit.curve.copy()
-                curve.insert(0, "file", str(path))
-                curve.insert(1, "sheet", table.sheet or "")
-                curve.insert(2, "group", table.group or "")
-                curves.append(curve)
-
-                summaries.append(
-                    {
-                        "file": str(path),
-                        "sheet": table.sheet or "",
-                        "group": table.group or "",
-                        "life_column": life_column,
-                        "response_column": response_column,
-                        "points": fit.result.points,
-                        "model": "response = a * exp(b * log10(life))",
-                        "coefficient_a": fit.result.coefficient_a,
-                        "coefficient_b": fit.result.coefficient_b,
-                        "r2": fit.result.r2,
-                        "rmse": fit.result.rmse,
-                        "life_min": fit.result.life_min,
-                        "life_max": fit.result.life_max,
-                        "response_min": fit.result.response_min,
-                        "response_max": fit.result.response_max,
-                        "formula": fit.result.formula,
-                        "figure": figure_path,
-                    }
-                )
-    finally:
-        if origin is not None:
-            origin.__exit__(None, None, None)
+        finally:
+            if origin is not None:
+                origin.__exit__(None, None, None)
 
     summary_path = output_dir / "fit_summary.csv"
     pd.DataFrame(summaries).to_csv(summary_path, index=False, encoding="utf-8-sig")

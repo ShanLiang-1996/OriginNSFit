@@ -70,8 +70,12 @@ class OriginClient:
         self._add_formula_label(layer, fit, life_column, response_column, title)
 
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        graph.save_fig(str(output_path), width=1600)
-        return output_path
+        graph.activate()
+        exported = graph.save_fig(str(output_path.resolve()), width=1600)
+        exported_path = Path(exported) if exported else output_path
+        if not exported_path.exists():
+            raise OriginAutomationError(f"Origin did not export figure: {output_path}")
+        return exported_path
 
     def _set_axis_labels(self, layer, life_column: str, response_column: str) -> None:
         x_label = layer.label("xb")
@@ -96,10 +100,10 @@ class OriginClient:
             f"R^2 = {fit.result.r2:.5f}"
         )
         x_position = 10 ** (
-            0.55 * self._safe_log10(fit.result.life_min)
-            + 0.45 * self._safe_log10(fit.result.life_max)
+            0.9 * self._safe_log10(fit.result.life_min)
+            + 0.1 * self._safe_log10(fit.result.life_max)
         )
-        y_position = fit.result.response_min + 0.85 * (
+        y_position = fit.result.response_min + 0.28 * (
             fit.result.response_max - fit.result.response_min
         )
         label = layer.add_label(text, x_position, y_position)
