@@ -42,7 +42,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Stress/strain response column. Defaults to 应变幅/应力幅.",
     )
     parser.add_argument("--fit-points", type=int, default=300, help="Number of curve points.")
-    parser.add_argument("--symbol-kind", type=int, default=3, help="Origin symbol kind for data points.")
+    parser.add_argument("--symbol-kind", type=int, default=2, help="Origin symbol kind for data points.")
     parser.add_argument("--dry-run", action="store_true", help="Skip Origin automation.")
     parser.add_argument("--hidden-origin", action="store_true", help="Do not show Origin UI.")
 

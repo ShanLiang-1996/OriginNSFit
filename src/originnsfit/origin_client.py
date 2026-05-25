@@ -199,7 +199,11 @@ class OriginClient:
         self._set_e739_engineering_limits(layer, job.fit)
         self._style_grid(layer)
         self._delete_legend(layer)
-        self._set_axis_label_text(layer, "Fatigue life N", "Stress/strain response")
+        self._set_axis_label_text(
+            layer,
+            "疲劳寿命 N\\-(f) / cycles",
+            "最大应变 \\x(03B5)\\-(max)",
+        )
         self._add_e739_engineering_label(layer, job)
         if output_path is None:
             return None
@@ -265,9 +269,11 @@ class OriginClient:
         x_label = layer.label("xb")
         if x_label is not None:
             x_label.text = x_text
+            x_label.set_int("verbatim", 0)
         y_label = layer.label("yl")
         if y_label is not None:
             y_label.text = y_text
+            y_label.set_int("verbatim", 0)
 
     def _style_grid(self, layer) -> None:
         layer.lt_exec(
@@ -399,8 +405,8 @@ class OriginClient:
     def _add_e739_engineering_label(self, layer, job: OriginE739Job) -> None:
         fit = job.fit
         x_position = 10 ** (
-            0.45 * self._safe_log10(fit.result.life_min)
-            + 0.55 * self._safe_log10(fit.result.life_max)
+            0.72 * self._safe_log10(fit.result.life_min)
+            + 0.28 * self._safe_log10(fit.result.life_max)
         )
         if fit.result.x_transform == "log":
             y_position = 10 ** (
@@ -412,9 +418,8 @@ class OriginClient:
                 fit.result.response_max - fit.result.response_min
             )
         text = (
-            f"{job.title}\n"
             f"{self._origin_life_response_formula(fit)}\n"
-            f"{fit.result.confidence:.0%} confidence band"
+            f"{fit.result.confidence:.0%} 置信带"
         )
         self._add_layer_label(layer, text, x_position, y_position)
 

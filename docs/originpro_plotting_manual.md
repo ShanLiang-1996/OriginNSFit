@@ -76,10 +76,10 @@ column       柱状图
 
 ## 4. 调整数据点样式
 
-当前项目默认三角点：
+当前项目 E739 工程图默认空心圆点：
 
 ```python
-data_plot.symbol_kind = 3
+data_plot.symbol_kind = 2
 data_plot.symbol_size = 15
 data_plot.symbol_interior = 1
 data_plot.set_cmd("-c 1", "-w 1500")
@@ -88,9 +88,9 @@ data_plot.set_cmd("-c 1", "-w 1500")
 常用属性：
 
 ```text
-symbol_kind       符号形状，项目里 3 为三角形
+symbol_kind       符号形状，项目里 2 为空心圆，3 为三角形
 symbol_size       符号大小
-symbol_interior   填充方式，1 通常为实心/常规填充
+symbol_interior   填充方式，1 通常为空心/常规填充
 ```
 
 `set_cmd()` 可以执行 Origin 的 LabTalk `set` 命令。常用项：
