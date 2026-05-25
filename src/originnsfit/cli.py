@@ -7,14 +7,24 @@ import re
 import pandas as pd
 
 from .data_loader import discover_files, read_table, sn_xy_columns
+from .e739 import E739Fit, fit_e739
 from .fitting import fit_sn_power_law
-from .origin_client import OriginAutomationError, OriginClient
+from .origin_client import OriginAutomationError, OriginClient, OriginE739Job
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="origin-ns-fit",
-        description="Batch read S-N data, fit power-law curves, and plot with Origin.",
+        description=(
+            "Batch read S-N/epsilon-N data, run ASTM E739 analysis, "
+            "and build Origin projects."
+        ),
+    )
+    parser.add_argument(
+        "--analysis",
+        choices=("e739", "power"),
+        default="e739",
+        help="Analysis workflow. Defaults to ASTM E739.",
     )
     parser.add_argument("--input", type=Path, default=Path("data"), help="Input data directory.")
     parser.add_argument("--output", type=Path, default=Path("output"), help="Output directory.")
@@ -24,29 +34,171 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="File glob pattern. Can be passed multiple times.",
     )
-    parser.add_argument("--life", "--x", dest="life", help="Life/N column. Defaults to 寿命.")
+    parser.add_argument("--life", "--x", dest="life", help="Fatigue life/N column. Defaults to 寿命.")
     parser.add_argument(
         "--response",
         "--y",
         dest="response",
         help="Stress/strain response column. Defaults to 应变幅/应力幅.",
     )
-    parser.add_argument("--fit-points", type=int, default=300, help="Number of fit curve points.")
+    parser.add_argument("--fit-points", type=int, default=300, help="Number of curve points.")
     parser.add_argument("--symbol-kind", type=int, default=3, help="Origin symbol kind for data points.")
     parser.add_argument("--dry-run", action="store_true", help="Skip Origin automation.")
     parser.add_argument("--hidden-origin", action="store_true", help="Do not show Origin UI.")
+
+    parser.add_argument(
+        "--e739-x-transform",
+        choices=("log", "linear"),
+        default="log",
+        help="E739 independent variable transform: log means X=log10(response).",
+    )
+    parser.add_argument(
+        "--confidence",
+        type=float,
+        default=0.95,
+        help="Confidence level for E739 intervals/bands, for example 0.95 or 95.",
+    )
+    parser.add_argument(
+        "--status",
+        help="Optional status column. Run-out/suspended rows are excluded with a warning.",
+    )
+    parser.add_argument(
+        "--level",
+        help="Optional nominal level column for E739 replicate/linearity testing.",
+    )
+    parser.add_argument(
+        "--replicate-decimals",
+        type=int,
+        default=8,
+        help="Decimals used to group replicated E739 X levels when --level is omitted.",
+    )
+    parser.add_argument(
+        "--project",
+        type=Path,
+        default=None,
+        help="Output Origin project path. Defaults to output/e739_analysis.opju.",
+    )
+    parser.add_argument(
+        "--graph-template",
+        type=Path,
+        default=None,
+        help="Optional Origin graph template (.otp/.otpu) for E739 output graphs.",
+    )
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.analysis == "power":
+        return _run_power_analysis(args)
+    return _run_e739_analysis(args)
+
+
+def _run_e739_analysis(args: argparse.Namespace) -> int:
     input_dir: Path = args.input
     output_dir: Path = args.output
     output_dir.mkdir(parents=True, exist_ok=True)
     figures_dir = output_dir / "figures"
 
-    patterns = args.pattern or ["*.csv", "*.tsv", "*.txt", "*.xlsx", "*.xls"]
-    files = discover_files(input_dir, patterns)
+    files = _discover_input_files(input_dir, args.pattern)
+    if not files:
+        print(f"No supported data files found in {input_dir}.")
+        return 1
+
+    summaries: list[dict[str, object]] = []
+    transformed_frames: list[pd.DataFrame] = []
+    curve_frames: list[pd.DataFrame] = []
+    level_frames: list[pd.DataFrame] = []
+    origin_jobs: list[OriginE739Job] = []
+
+    for path in files:
+        for table in read_table(path):
+            try:
+                life_column, response_column = sn_xy_columns(table.frame, args.life, args.response)
+                fit = fit_e739(
+                    table.frame,
+                    life_column,
+                    response_column,
+                    x_transform=args.e739_x_transform,
+                    confidence=args.confidence,
+                    fit_points=args.fit_points,
+                    status_column=args.status,
+                    level_column=args.level,
+                    replicate_decimals=args.replicate_decimals,
+                )
+            except Exception as exc:
+                print(f"E739 analysis failed for {table.label}: {exc}")
+                continue
+
+            label = _safe_name(table.label)
+            title = str(table.group or table.sheet or path.stem)
+            summaries.append(
+                _e739_summary_record(
+                    fit,
+                    path,
+                    table.sheet,
+                    table.group,
+                    label,
+                    life_column,
+                    response_column,
+                )
+            )
+            transformed_frames.append(_with_metadata(fit.data, path, table.sheet, table.group, label))
+            curve_frames.append(_with_metadata(fit.curve, path, table.sheet, table.group, label))
+            level_frames.append(_with_metadata(fit.level_stats, path, table.sheet, table.group, label))
+            origin_jobs.append(OriginE739Job(fit=fit, label=label, title=title))
+
+    if not summaries:
+        print("No E739 analyses were completed.")
+        return 1
+
+    summary_path = output_dir / "e739_summary.csv"
+    transformed_path = output_dir / "e739_transformed_data.csv"
+    curves_path = output_dir / "e739_curve_bands.csv"
+    levels_path = output_dir / "e739_level_stats.csv"
+
+    summary_frame = pd.DataFrame(summaries)
+    _write_e739_outputs(summary_frame, transformed_frames, curve_frames, level_frames, output_dir)
+
+    if not args.dry_run:
+        project_path = args.project or (output_dir / "e739_analysis.opju")
+        origin = None
+        try:
+            origin = OriginClient(visible=not args.hidden_origin).__enter__()
+            saved_project, figure_records = origin.create_e739_project(
+                origin_jobs,
+                summary_frame,
+                project_path,
+                figures_dir=figures_dir,
+                symbol_kind=args.symbol_kind,
+                graph_template_path=args.graph_template,
+            )
+            _merge_origin_outputs(summaries, saved_project, figure_records)
+            summary_frame = pd.DataFrame(summaries)
+            summary_frame.to_csv(summary_path, index=False, encoding="utf-8-sig")
+            print(f"Wrote Origin project {saved_project}")
+        except OriginAutomationError as exc:
+            print(f"Origin automation disabled: {exc}")
+        except Exception as exc:
+            print(f"Origin automation failed: {exc}")
+        finally:
+            if origin is not None:
+                origin.__exit__(None, None, None)
+
+    print(f"Wrote {summary_path}")
+    print(f"Wrote {transformed_path}")
+    print(f"Wrote {curves_path}")
+    print(f"Wrote {levels_path}")
+    return 0
+
+
+def _run_power_analysis(args: argparse.Namespace) -> int:
+    input_dir: Path = args.input
+    output_dir: Path = args.output
+    output_dir.mkdir(parents=True, exist_ok=True)
+    figures_dir = output_dir / "figures"
+
+    files = _discover_input_files(input_dir, args.pattern)
     if not files:
         print(f"No supported data files found in {input_dir}.")
         return 1
@@ -163,6 +315,143 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Wrote {curves_path}")
     print(f"Wrote {lines_path}")
     return 0
+
+
+def _discover_input_files(input_dir: Path, patterns: list[str] | None) -> list[Path]:
+    return discover_files(input_dir, patterns or ["*.csv", "*.tsv", "*.txt", "*.xlsx", "*.xls"])
+
+
+def _e739_summary_record(
+    fit: E739Fit,
+    path: Path,
+    sheet: str | None,
+    group: str | None,
+    label: str,
+    life_column: str,
+    response_column: str,
+) -> dict[str, object]:
+    result = fit.result
+    linearity = result.linearity_test
+    return {
+        "label": label,
+        "file": str(path),
+        "sheet": sheet or "",
+        "group": group or "",
+        "analysis": "ASTM E739 linearized OLS",
+        "life_column": life_column,
+        "response_column": response_column,
+        "x_transform": result.x_transform,
+        "confidence": result.confidence,
+        "points": result.points,
+        "degrees_of_freedom": result.degrees_of_freedom,
+        "coefficient_a": result.coefficient_a,
+        "coefficient_b": result.coefficient_b,
+        "coefficient_a_lower": result.coefficient_a_lower,
+        "coefficient_a_upper": result.coefficient_a_upper,
+        "coefficient_b_lower": result.coefficient_b_lower,
+        "coefficient_b_upper": result.coefficient_b_upper,
+        "standard_error_a": result.standard_error_a,
+        "standard_error_b": result.standard_error_b,
+        "t_critical": result.t_critical,
+        "f_band_critical": result.f_band_critical,
+        "simultaneous_band_factor": result.simultaneous_band_factor,
+        "sigma": result.sigma,
+        "sigma_squared": result.sigma_squared,
+        "residual_sum_squares": result.residual_sum_squares,
+        "r2_log_life": result.r2,
+        "rmse_log_life": result.rmse_log_life,
+        "x_mean": result.x_mean,
+        "y_mean": result.y_mean,
+        "sxx": result.sxx,
+        "sxy": result.sxy,
+        "x_min": result.x_min,
+        "x_max": result.x_max,
+        "life_min": result.life_min,
+        "life_max": result.life_max,
+        "response_min": result.response_min,
+        "response_max": result.response_max,
+        "replication_percent": result.replication_percent,
+        "life_response_coefficient_a": result.life_response_coefficient_a,
+        "life_response_coefficient_b": result.life_response_coefficient_b,
+        "linearity_available": linearity.available,
+        "linearity_reason": linearity.reason,
+        "linearity_levels": linearity.levels,
+        "linearity_lack_of_fit_df": linearity.lack_of_fit_df,
+        "linearity_pure_error_df": linearity.pure_error_df,
+        "linearity_lack_of_fit_ss": linearity.lack_of_fit_ss,
+        "linearity_pure_error_ss": linearity.pure_error_ss,
+        "linearity_lack_of_fit_ms": linearity.lack_of_fit_ms,
+        "linearity_pure_error_ms": linearity.pure_error_ms,
+        "linearity_f_statistic": linearity.f_statistic,
+        "linearity_f_critical": linearity.f_critical,
+        "linearity_p_value": linearity.p_value,
+        "linearity_reject_linear_model": linearity.reject_linear_model,
+        "log_life_formula": result.log_life_formula,
+        "life_formula": result.life_formula,
+        "life_response_formula": result.life_response_formula,
+        "response_life_formula": result.response_life_formula,
+        "warnings": "; ".join(result.warnings),
+        "origin_project": "",
+        "engineering_figure": "",
+        "linearized_figure": "",
+    }
+
+
+def _with_metadata(
+    frame: pd.DataFrame,
+    path: Path,
+    sheet: str | None,
+    group: str | None,
+    label: str,
+) -> pd.DataFrame:
+    result = frame.copy()
+    metadata = [
+        ("label", label),
+        ("file", str(path)),
+        ("sheet", sheet or ""),
+        ("group", group or ""),
+    ]
+    for column, value in reversed(metadata):
+        result.insert(0, column, value)
+    return result
+
+
+def _write_e739_outputs(
+    summary_frame: pd.DataFrame,
+    transformed_frames: list[pd.DataFrame],
+    curve_frames: list[pd.DataFrame],
+    level_frames: list[pd.DataFrame],
+    output_dir: Path,
+) -> None:
+    summary_frame.to_csv(output_dir / "e739_summary.csv", index=False, encoding="utf-8-sig")
+    pd.concat(transformed_frames, ignore_index=True).to_csv(
+        output_dir / "e739_transformed_data.csv",
+        index=False,
+        encoding="utf-8-sig",
+    )
+    pd.concat(curve_frames, ignore_index=True).to_csv(
+        output_dir / "e739_curve_bands.csv",
+        index=False,
+        encoding="utf-8-sig",
+    )
+    pd.concat(level_frames, ignore_index=True).to_csv(
+        output_dir / "e739_level_stats.csv",
+        index=False,
+        encoding="utf-8-sig",
+    )
+
+
+def _merge_origin_outputs(
+    summaries: list[dict[str, object]],
+    project_path: Path,
+    figure_records: list[dict[str, str]],
+) -> None:
+    figures_by_label = {record["label"]: record for record in figure_records}
+    for summary in summaries:
+        summary["origin_project"] = str(project_path)
+        figures = figures_by_label.get(str(summary["label"]), {})
+        summary["engineering_figure"] = figures.get("engineering_figure", "")
+        summary["linearized_figure"] = figures.get("linearized_figure", "")
 
 
 def _safe_name(value: str) -> str:

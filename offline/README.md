@@ -1,6 +1,6 @@
 # OriginNSFit 离线部署包
 
-这个目录用于在不能联网的 Windows 电脑上部署 OriginNSFit，并运行 S-N 曲线批量拟合和 Origin 绘图。
+这个目录用于在不能联网的 Windows 电脑上部署 OriginNSFit，并运行 ASTM E739 S-N / ε-N 分析和 Origin 项目生成。
 
 ## 适用环境
 
@@ -42,15 +42,16 @@ python -m venv .venv
 只拟合并输出 CSV，不启动 Origin：
 
 ```powershell
-.\.venv\Scripts\python.exe -m originnsfit --input examples --output output --pattern example.csv --dry-run
+.\.venv\Scripts\python.exe -m originnsfit --input examples --output output --pattern e739_example.csv --level "名义水平" --dry-run
 ```
 
 成功后会生成：
 
 ```text
-output\fit_summary.csv
-output\fit_curves.csv
-output\fit_lines.csv
+output\e739_summary.csv
+output\e739_transformed_data.csv
+output\e739_curve_bands.csv
+output\e739_level_stats.csv
 ```
 
 ## 真实连接 Origin
@@ -61,13 +62,16 @@ output\fit_lines.csv
 .\.venv\Scripts\python.exe -m originnsfit --input data --output output --pattern "*.csv"
 ```
 
-每组试验会单独拟合并导出 Origin 图：
+默认会生成 Origin 项目和导出图：
 
 ```text
+output\e739_analysis.opju
 output\figures\
 ```
 
-图中包含三角形原始数据点、幂律拟合线、渲染后的 `\Delta \epsilon = a (N_f)^b` 公式、R2、网格线，以及 `log10` 寿命横坐标和线性响应纵坐标。
+Origin 项目中包含总汇总表、每组有效点、线性化值、置信带采样点、重复水平统计、E739 线性化图和工程习惯的 S-N / ε-N 图。
+
+主工程图默认使用包内模板 `src/originnsfit/templates/e739_graph1.otpu`。如果需要换成新的 Origin 图模板，可以运行时加 `--graph-template "C:\path\to\your_template.otpu"`。
 
 如果列名不同，可以手动指定：
 

@@ -42,6 +42,8 @@ output/*
 *.ogwu
 *.otp
 *.otpu
+!src/originnsfit/templates/
+!src/originnsfit/templates/*.otpu
 
 # OS/editor noise
 .DS_Store
