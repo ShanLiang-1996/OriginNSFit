@@ -23,6 +23,12 @@ class OriginE739Job:
     title: str
 
 
+@dataclass(frozen=True)
+class ResponsePresentation:
+    axis_label: str
+    formula_variable: str
+
+
 class OriginClient:
     def __init__(self, visible: bool = True) -> None:
         try:
@@ -110,24 +116,24 @@ class OriginClient:
         summary_book = self._op.new_book("w", lname="E739 Summary")
         summary_wks = summary_book[0]
         summary_wks.name = "Summary"
-        summary_wks.from_df(summary)
+        self._write_frame_to_sheet(summary_wks, summary)
 
         figure_records: list[dict[str, str]] = []
         for job in jobs:
             book = self._op.new_book("w", lname=job.title)
             data_wks = book[0]
             data_wks.name = "Data"
-            data_wks.from_df(job.fit.data)
+            self._write_frame_to_sheet(data_wks, job.fit.data)
 
             curve_wks = book.add_sheet("CurveBand")
-            curve_wks.from_df(job.fit.curve)
+            self._write_frame_to_sheet(curve_wks, job.fit.curve)
 
             level_wks = book.add_sheet("Levels")
-            level_wks.from_df(job.fit.level_stats)
+            self._write_frame_to_sheet(level_wks, job.fit.level_stats)
 
             job_summary = summary[summary["label"] == job.label] if "label" in summary else summary
             summary_wks = book.add_sheet("Summary")
-            summary_wks.from_df(job_summary.reset_index(drop=True))
+            self._write_frame_to_sheet(summary_wks, job_summary.reset_index(drop=True))
 
             record: dict[str, str] = {"label": job.label}
             if figures_dir is not None:
@@ -160,11 +166,8 @@ class OriginClient:
             )
             figure_records.append(record)
 
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        saved = self._op.save(str(output_path.resolve()))
-        if not saved or not output_path.exists():
-            raise OriginAutomationError(f"Origin did not save project: {output_path}")
-        return output_path, figure_records
+        saved_project = self._save_project(output_path)
+        return saved_project, figure_records
 
     def _plot_e739_engineering(
         self,
@@ -202,7 +205,7 @@ class OriginClient:
         self._set_axis_label_text(
             layer,
             "疲劳寿命 N\\-(f) / cycles",
-            "最大应变 \\x(03B5)\\-(max)",
+            self._response_presentation(job.fit.result.response_column).axis_label,
         )
         self._add_e739_engineering_label(layer, job)
         if output_path is None:
@@ -269,11 +272,11 @@ class OriginClient:
         x_label = layer.label("xb")
         if x_label is not None:
             x_label.text = x_text
-            x_label.set_int("verbatim", 0)
+            self._safe_set_int(x_label, "verbatim", 0)
         y_label = layer.label("yl")
         if y_label is not None:
             y_label.text = y_text
-            y_label.set_int("verbatim", 0)
+            self._safe_set_int(y_label, "verbatim", 0)
 
     def _style_grid(self, layer) -> None:
         layer.lt_exec(
@@ -319,8 +322,16 @@ class OriginClient:
     def _new_e739_graph(self, title: str, graph_template_path: Path | None):
         template_path = graph_template_path or self._default_e739_graph_template()
         if template_path is not None and template_path.exists():
-            return self._op.new_graph(lname=title, template=str(template_path.resolve()))
-        return self._op.new_graph(lname=title)
+            try:
+                graph = self._op.new_graph(lname=title, template=str(template_path.resolve()))
+                if graph is not None:
+                    return graph
+            except Exception as exc:
+                print(f"Origin graph template skipped for compatibility: {exc}")
+        graph = self._op.new_graph(lname=title)
+        if graph is None:
+            raise OriginAutomationError("Origin did not create a graph page.")
+        return graph
 
     def _default_e739_graph_template(self) -> Path | None:
         template = resources.files("originnsfit").joinpath("templates/e739_graph1.otpu")
@@ -342,9 +353,10 @@ class OriginClient:
     def _set_e739_engineering_limits(self, layer, fit: E739Fit) -> None:
         x_min = min(float(fit.curve["life_lower_band"].min()), fit.result.life_min)
         x_max = max(float(fit.curve["life_upper_band"].max()), fit.result.life_max)
-        layer.set_xlim(*self._expanded_log_limits(x_min, x_max, pad=0.06))
+        self._safe_set_xlim(layer, *self._expanded_log_limits(x_min, x_max, pad=0.06))
         if fit.result.x_transform == "log":
-            layer.set_ylim(
+            self._safe_set_ylim(
+                layer,
                 *self._expanded_log_limits(
                     fit.result.response_min,
                     fit.result.response_max,
@@ -352,7 +364,8 @@ class OriginClient:
                 )
             )
         else:
-            layer.set_ylim(
+            self._safe_set_ylim(
+                layer,
                 *self._expanded_linear_limits(
                     fit.result.response_min,
                     fit.result.response_max,
@@ -361,7 +374,10 @@ class OriginClient:
             )
 
     def _set_e739_linearized_limits(self, layer, fit: E739Fit) -> None:
-        layer.set_xlim(*self._expanded_linear_limits(fit.result.x_min, fit.result.x_max, pad=0.06))
+        self._safe_set_xlim(
+            layer,
+            *self._expanded_linear_limits(fit.result.x_min, fit.result.x_max, pad=0.06),
+        )
         y_min = min(
             float(fit.data["e739_y_log10_life"].min()),
             float(fit.curve["log10_life_lower_band"].min()),
@@ -370,7 +386,7 @@ class OriginClient:
             float(fit.data["e739_y_log10_life"].max()),
             float(fit.curve["log10_life_upper_band"].max()),
         )
-        layer.set_ylim(*self._expanded_linear_limits(y_min, y_max, pad=0.08))
+        self._safe_set_ylim(layer, *self._expanded_linear_limits(y_min, y_max, pad=0.08))
 
     def _delete_legend(self, layer) -> None:
         for name in ("Legend", "legend"):
@@ -426,19 +442,49 @@ class OriginClient:
     def _add_layer_label(self, layer, text: str, x_position: float, y_position: float) -> None:
         label = layer.add_label(text, x_position, y_position)
         if label is not None:
-            label.set_int("verbatim", 0)
-            label.set_int("attach", 2)
-            label.set_float("x1", x_position)
-            label.set_float("y1", y_position)
+            self._safe_set_int(label, "verbatim", 0)
+            self._safe_set_int(label, "attach", 2)
+            self._safe_set_float(label, "x1", x_position)
+            self._safe_set_float(label, "y1", y_position)
 
     def _export_graph(self, graph, output_path: Path) -> Path:
         output_path.parent.mkdir(parents=True, exist_ok=True)
         graph.activate()
-        exported = graph.save_fig(str(output_path.resolve()), width=1600)
+        try:
+            exported = graph.save_fig(str(output_path.resolve()), width=1600)
+        except Exception:
+            exported = graph.save_fig(str(output_path.resolve()))
         exported_path = Path(exported) if exported else output_path
         if not exported_path.exists():
             raise OriginAutomationError(f"Origin did not export figure: {output_path}")
         return exported_path
+
+    def _save_project(self, output_path: Path) -> Path:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        candidates = self._project_save_candidates(output_path)
+        for candidate in candidates:
+            candidate.parent.mkdir(parents=True, exist_ok=True)
+            if self._try_save_project(candidate):
+                return candidate
+        tried = ", ".join(str(candidate) for candidate in candidates)
+        raise OriginAutomationError(f"Origin did not save project. Tried: {tried}")
+
+    def _project_save_candidates(self, output_path: Path) -> list[Path]:
+        suffix = output_path.suffix.lower()
+        if suffix == ".opj":
+            return [output_path, output_path.with_suffix(".opju")]
+        if suffix == ".opju":
+            return [output_path, output_path.with_suffix(".opj")]
+        if suffix:
+            return [output_path, output_path.with_suffix(".opj"), output_path.with_suffix(".opju")]
+        return [output_path.with_suffix(".opj"), output_path.with_suffix(".opju")]
+
+    def _try_save_project(self, output_path: Path) -> bool:
+        try:
+            saved = self._op.save(str(output_path.resolve()))
+        except Exception:
+            return False
+        return bool(saved and output_path.exists())
 
     def _origin_formula_text(self, title: str, fit: SNCurveFit) -> str:
         return (
@@ -451,10 +497,74 @@ class OriginClient:
     def _origin_life_response_formula(self, fit: E739Fit) -> str:
         if fit.result.x_transform != "log":
             return fit.result.life_response_formula
+        variable = self._response_presentation(fit.result.response_column).formula_variable
         return (
             f"N\\-(f) = {fit.result.life_response_coefficient_a:.6g} "
-            f"* (\\x(03B5)\\-(max))\\+({fit.result.life_response_coefficient_b:.6g})"
+            f"* ({variable})\\+({fit.result.life_response_coefficient_b:.6g})"
         )
+
+    def _write_frame_to_sheet(self, sheet, frame: pd.DataFrame) -> None:
+        try:
+            sheet.from_df(frame)
+            return
+        except Exception as exc:
+            print(f"Origin worksheet DataFrame import fallback: {exc}")
+
+        for column_index, column in enumerate(frame.columns):
+            values = [
+                "" if pd.isna(value) else value
+                for value in frame[column].tolist()
+            ]
+            sheet.from_list(column_index, values, str(column))
+
+    def _response_presentation(self, response_column: str) -> ResponsePresentation:
+        text = str(response_column).strip()
+        lowered = text.lower().replace("_", " ").replace("-", " ")
+        is_stress = "应力" in text or "stress" in lowered or "sigma" in lowered
+        is_max = any(token in text for token in ("最大", "峰值")) or any(
+            token in lowered
+            for token in ("max", "maximum", "peak")
+        )
+        is_amplitude = "幅" in text or "amplitude" in lowered or lowered.endswith(" amp")
+
+        if is_stress:
+            greek = "\\x(03C3)"
+            if is_max:
+                return ResponsePresentation(f"最大应力 {greek}\\-(max)", f"{greek}\\-(max)")
+            if is_amplitude:
+                return ResponsePresentation(f"{text} {greek}\\-(a)", f"{greek}\\-(a)")
+            return ResponsePresentation(f"{text} {greek}", greek)
+
+        greek = "\\x(03B5)"
+        if is_max:
+            return ResponsePresentation(f"最大应变 {greek}\\-(max)", f"{greek}\\-(max)")
+        if is_amplitude:
+            return ResponsePresentation(f"{text} {greek}\\-(a)", f"{greek}\\-(a)")
+        return ResponsePresentation(f"{text} {greek}", greek)
+
+    def _safe_set_xlim(self, layer, begin: float, end: float) -> None:
+        try:
+            layer.set_xlim(begin, end)
+        except Exception:
+            pass
+
+    def _safe_set_ylim(self, layer, begin: float, end: float) -> None:
+        try:
+            layer.set_ylim(begin, end)
+        except Exception:
+            pass
+
+    def _safe_set_int(self, obj, prop: str, value: int) -> None:
+        try:
+            obj.set_int(prop, value)
+        except Exception:
+            pass
+
+    def _safe_set_float(self, obj, prop: str, value: float) -> None:
+        try:
+            obj.set_float(prop, value)
+        except Exception:
+            pass
 
     @staticmethod
     def _origin_signed(value: float) -> str:

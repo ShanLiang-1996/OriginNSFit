@@ -51,6 +51,8 @@ class E739LinearityTest:
 
 @dataclass(frozen=True)
 class E739FitResult:
+    life_column: str
+    response_column: str
     confidence: float
     x_transform: E739Transform
     points: int
@@ -271,6 +273,8 @@ def fit_e739(
     )
 
     result = E739FitResult(
+        life_column=life_column,
+        response_column=response_column,
         confidence=confidence,
         x_transform=x_transform,
         points=k,

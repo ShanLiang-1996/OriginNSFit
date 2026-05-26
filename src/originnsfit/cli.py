@@ -39,7 +39,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--response",
         "--y",
         dest="response",
-        help="Stress/strain response column. Defaults to 应变幅/应力幅.",
+        help="Stress/strain response column. Defaults to common strain/stress names.",
     )
     parser.add_argument("--fit-points", type=int, default=300, help="Number of curve points.")
     parser.add_argument("--symbol-kind", type=int, default=2, help="Origin symbol kind for data points.")
@@ -76,7 +76,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--project",
         type=Path,
         default=None,
-        help="Output Origin project path. Defaults to output/e739_analysis.opju.",
+        help="Output Origin project path. Defaults to output/e739_analysis.opj.",
     )
     parser.add_argument(
         "--graph-template",
@@ -161,7 +161,7 @@ def _run_e739_analysis(args: argparse.Namespace) -> int:
     _write_e739_outputs(summary_frame, transformed_frames, curve_frames, level_frames, output_dir)
 
     if not args.dry_run:
-        project_path = args.project or (output_dir / "e739_analysis.opju")
+        project_path = args.project or (output_dir / "e739_analysis.opj")
         origin = None
         try:
             origin = OriginClient(visible=not args.hidden_origin).__enter__()

@@ -10,7 +10,33 @@ import pandas as pd
 
 SUPPORTED_SUFFIXES = {".csv", ".tsv", ".txt", ".xls", ".xlsx"}
 LIFE_COLUMN_KEYWORDS = ("寿命", "life", "cycles", "cycle", "fatigue life", "n")
-RESPONSE_COLUMN_KEYWORDS = ("应变幅", "应力幅", "strain", "stress", "amplitude", "s")
+RESPONSE_COLUMN_KEYWORDS = (
+    "塑性应变幅",
+    "应变最大值",
+    "最大应变",
+    "最大应力",
+    "应变幅",
+    "应力幅",
+    "应变",
+    "应力",
+    "strain maximum",
+    "maximum strain",
+    "max strain",
+    "strain max",
+    "strain amplitude",
+    "stress maximum",
+    "maximum stress",
+    "max stress",
+    "stress max",
+    "stress amplitude",
+    "epsilon max",
+    "eps max",
+    "emax",
+    "strain",
+    "stress",
+    "amplitude",
+    "s",
+)
 
 
 @dataclass(frozen=True)
