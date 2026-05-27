@@ -326,7 +326,7 @@ class OriginClient:
         self._set_e739_linearized_limits(layer, job.fit)
         self._style_grid(layer)
         self._delete_legend(layer)
-        x_label = "log10(response)" if job.fit.result.x_transform == "log" else "response"
+        x_label = self._linearized_x_axis_label(job.fit)
         self._set_axis_label_text(layer, x_label, "log10(N)")
         self._add_e739_linearized_label(layer, job)
         if output_path is None:
@@ -684,10 +684,28 @@ class OriginClient:
         if fit.result.x_transform != "log":
             return fit.result.life_response_formula
         variable = self._response_presentation(fit.result.response_column).formula_variable
+        if fit.result.model == "shifted-log":
+            shifted_variable = self._origin_shifted_variable(variable, fit.result.coefficient_c)
+            return (
+                f"N\\-(f) = {fit.result.life_response_coefficient_a:.6g} "
+                f"* {shifted_variable}\\+({fit.result.life_response_coefficient_b:.6g})"
+            )
         return (
             f"N\\-(f) = {fit.result.life_response_coefficient_a:.6g} "
             f"* ({variable})\\+({fit.result.life_response_coefficient_b:.6g})"
         )
+
+    def _origin_shifted_variable(self, variable: str, coefficient_c: float | None) -> str:
+        if coefficient_c is None:
+            return f"({variable})"
+        if coefficient_c < 0:
+            return f"({variable} + {abs(coefficient_c):.6g})"
+        return f"({variable} - {coefficient_c:.6g})"
+
+    def _linearized_x_axis_label(self, fit: E739Fit) -> str:
+        if fit.result.model == "shifted-log":
+            return "log10(response - C)"
+        return "log10(response)" if fit.result.x_transform == "log" else "response"
 
     def _write_frame_to_sheet(self, sheet, frame: pd.DataFrame) -> None:
         try:

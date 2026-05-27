@@ -54,6 +54,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="E739 independent variable transform: log means X=log10(response).",
     )
     parser.add_argument(
+        "--e739-model",
+        choices=("standard", "shifted-log"),
+        default="standard",
+        help="E739 model. standard: log10(N)=A+B*X; shifted-log: log10(N)=A+B*log10(response-C).",
+    )
+    parser.add_argument(
         "--confidence",
         type=float,
         default=0.95,
@@ -125,6 +131,7 @@ def _run_e739_analysis(args: argparse.Namespace) -> int:
                     table.frame,
                     life_column,
                     response_column,
+                    model=args.e739_model,
                     x_transform=args.e739_x_transform,
                     confidence=args.confidence,
                     fit_points=args.fit_points,
@@ -346,21 +353,31 @@ def _e739_summary_record(
         "file": str(path),
         "sheet": sheet or "",
         "group": group or "",
-        "analysis": "ASTM E739 linearized OLS",
+        "analysis": (
+            "ASTM E739 linearized OLS"
+            if result.model == "standard"
+            else "Shifted-log nonlinear least squares"
+        ),
+        "model": result.model,
         "life_column": life_column,
         "response_column": response_column,
         "x_transform": result.x_transform,
         "confidence": result.confidence,
+        "parameter_count": result.parameter_count,
         "points": result.points,
         "degrees_of_freedom": result.degrees_of_freedom,
         "coefficient_a": result.coefficient_a,
         "coefficient_b": result.coefficient_b,
+        "coefficient_c": result.coefficient_c,
         "coefficient_a_lower": result.coefficient_a_lower,
         "coefficient_a_upper": result.coefficient_a_upper,
         "coefficient_b_lower": result.coefficient_b_lower,
         "coefficient_b_upper": result.coefficient_b_upper,
+        "coefficient_c_lower": result.coefficient_c_lower,
+        "coefficient_c_upper": result.coefficient_c_upper,
         "standard_error_a": result.standard_error_a,
         "standard_error_b": result.standard_error_b,
+        "standard_error_c": result.standard_error_c,
         "t_critical": result.t_critical,
         "f_band_critical": result.f_band_critical,
         "simultaneous_band_factor": result.simultaneous_band_factor,
