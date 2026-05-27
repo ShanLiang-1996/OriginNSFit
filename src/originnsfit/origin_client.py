@@ -108,6 +108,7 @@ class OriginClient:
         figures_dir: Path | None = None,
         symbol_kind: int = 3,
         graph_template_path: Path | None = None,
+        use_default_graph_template: bool = True,
     ) -> tuple[Path, list[dict[str, str]]]:
         self._op.new(False)
         if not jobs:
@@ -151,6 +152,7 @@ class OriginClient:
                     engineering_path,
                     symbol_kind,
                     graph_template_path,
+                    use_default_graph_template,
                 )
                 or ""
             )
@@ -177,28 +179,72 @@ class OriginClient:
         output_path: Path | None,
         symbol_kind: int,
         graph_template_path: Path | None,
+        use_default_graph_template: bool,
     ) -> Path | None:
-        graph = self._new_e739_graph(f"{job.title} E739", graph_template_path)
+        graph = self._new_e739_graph(
+            f"{job.title} E739",
+            graph_template_path,
+            use_default_graph_template,
+        )
         layer = graph[0]
         self._clear_template_text_labels(layer)
-        lower_plot = layer.add_plot(curve_wks, "response", "life_lower_band", type="line")
-        upper_plot = layer.add_plot(curve_wks, "response", "life_upper_band", type="line")
-        fit_plot = layer.add_plot(curve_wks, "response", "life_fit", type="line")
-        data_plot = layer.add_plot(data_wks, "e739_response", "e739_life", type="scatter")
+        self._clear_layer_plots(layer)
+        graph_name = self._graph_name(graph)
+
+        self._plotxy_from_wks(
+            curve_wks,
+            self._column_index(job.fit.curve, "life_lower_band"),
+            self._column_index(job.fit.curve, "response"),
+            plot_code=200,
+            target_graph=graph_name,
+        )
+        self._plotxy_from_wks(
+            curve_wks,
+            self._column_index(job.fit.curve, "life_upper_band"),
+            self._column_index(job.fit.curve, "response"),
+            plot_code=200,
+            target_graph=graph_name,
+        )
+        self._plotxy_from_wks(
+            curve_wks,
+            self._column_index(job.fit.curve, "life_fit"),
+            self._column_index(job.fit.curve, "response"),
+            plot_code=200,
+            target_graph=graph_name,
+        )
+        self._plotxy_from_wks(
+            data_wks,
+            self._column_index(job.fit.data, "e739_life"),
+            self._column_index(job.fit.data, "e739_response"),
+            plot_code=201,
+            target_graph=graph_name,
+        )
+
+        graph = self._find_graph(graph_name) or graph
+        layer = graph[0]
+        plots = self._plot_list(layer)
+        lower_plot = plots[0] if len(plots) > 0 else None
+        upper_plot = plots[1] if len(plots) > 1 else None
+        fit_plot = plots[2] if len(plots) > 2 else None
+        data_plot = plots[3] if len(plots) > 3 else None
+        if len(plots) < 4:
+            raise OriginAutomationError(
+                f"Origin created only {len(plots)} engineering plot(s) for {job.label}."
+            )
 
         self._style_confidence_plot(lower_plot)
         self._style_confidence_plot(upper_plot)
         if fit_plot is not None:
-            fit_plot.set_cmd("-c 2", "-w 1000")
+            self._safe_plot_cmd(fit_plot, "-c 2", "-w 1000")
         if data_plot is not None:
-            data_plot.symbol_kind = symbol_kind
-            data_plot.symbol_size = 15
-            data_plot.symbol_interior = 1
-            data_plot.set_cmd("-c 1", "-w 1500")
+            self._style_data_plot(data_plot, symbol_kind)
 
-        layer.xscale = "log10"
-        layer.yscale = "log10" if job.fit.result.x_transform == "log" else "linear"
-        layer.rescale()
+        self._set_layer_scale(
+            layer,
+            "log10",
+            "log10" if job.fit.result.x_transform == "log" else "linear",
+        )
+        self._safe_rescale(layer)
         self._set_e739_engineering_limits(layer, job.fit)
         self._style_grid(layer)
         self._delete_legend(layer)
@@ -221,40 +267,62 @@ class OriginClient:
         symbol_kind: int,
     ) -> Path | None:
         graph = self._op.new_graph(lname=f"{job.title} E739 Linearized")
+        if graph is None:
+            raise OriginAutomationError("Origin did not create a linearized graph page.")
         layer = graph[0]
-        lower_plot = layer.add_plot(
+        self._clear_layer_plots(layer)
+        graph_name = self._graph_name(graph)
+
+        self._plotxy_from_wks(
             curve_wks,
-            "log10_life_lower_band",
-            "e739_x",
-            type="line",
+            self._column_index(job.fit.curve, "e739_x"),
+            self._column_index(job.fit.curve, "log10_life_lower_band"),
+            plot_code=200,
+            target_graph=graph_name,
         )
-        upper_plot = layer.add_plot(
+        self._plotxy_from_wks(
             curve_wks,
-            "log10_life_upper_band",
-            "e739_x",
-            type="line",
+            self._column_index(job.fit.curve, "e739_x"),
+            self._column_index(job.fit.curve, "log10_life_upper_band"),
+            plot_code=200,
+            target_graph=graph_name,
         )
-        fit_plot = layer.add_plot(curve_wks, "log10_life_fit", "e739_x", type="line")
-        data_plot = layer.add_plot(
+        self._plotxy_from_wks(
+            curve_wks,
+            self._column_index(job.fit.curve, "e739_x"),
+            self._column_index(job.fit.curve, "log10_life_fit"),
+            plot_code=200,
+            target_graph=graph_name,
+        )
+        self._plotxy_from_wks(
             data_wks,
-            "e739_y_log10_life",
-            "e739_x",
-            type="scatter",
+            self._column_index(job.fit.data, "e739_x"),
+            self._column_index(job.fit.data, "e739_y_log10_life"),
+            plot_code=201,
+            target_graph=graph_name,
         )
+
+        graph = self._find_graph(graph_name) or graph
+        layer = graph[0]
+        plots = self._plot_list(layer)
+        lower_plot = plots[0] if len(plots) > 0 else None
+        upper_plot = plots[1] if len(plots) > 1 else None
+        fit_plot = plots[2] if len(plots) > 2 else None
+        data_plot = plots[3] if len(plots) > 3 else None
+        if len(plots) < 4:
+            raise OriginAutomationError(
+                f"Origin created only {len(plots)} linearized plot(s) for {job.label}."
+            )
 
         self._style_confidence_plot(lower_plot)
         self._style_confidence_plot(upper_plot)
         if fit_plot is not None:
-            fit_plot.set_cmd("-c 2", "-w 1000")
+            self._safe_plot_cmd(fit_plot, "-c 2", "-w 1000")
         if data_plot is not None:
-            data_plot.symbol_kind = symbol_kind
-            data_plot.symbol_size = 15
-            data_plot.symbol_interior = 1
-            data_plot.set_cmd("-c 1", "-w 1500")
+            self._style_data_plot(data_plot, symbol_kind)
 
-        layer.xscale = "linear"
-        layer.yscale = "linear"
-        layer.rescale()
+        self._set_layer_scale(layer, "linear", "linear")
+        self._safe_rescale(layer)
         self._set_e739_linearized_limits(layer, job.fit)
         self._style_grid(layer)
         self._delete_legend(layer)
@@ -317,10 +385,117 @@ class OriginClient:
 
     def _style_confidence_plot(self, plot) -> None:
         if plot is not None:
-            plot.set_cmd("-c 15", "-w 500")
+            self._safe_plot_cmd(plot, "-c 15", "-w 500")
 
-    def _new_e739_graph(self, title: str, graph_template_path: Path | None):
-        template_path = graph_template_path or self._default_e739_graph_template()
+    def _style_data_plot(self, plot, symbol_kind: int) -> None:
+        try:
+            plot.symbol_kind = symbol_kind
+            plot.symbol_size = 15
+            plot.symbol_interior = 1
+        except Exception:
+            pass
+        self._safe_plot_cmd(plot, "-c 1", "-w 1500")
+
+    def _safe_plot_cmd(self, plot, *commands: str) -> None:
+        try:
+            plot.set_cmd(*commands)
+        except Exception:
+            pass
+
+    def _plotxy_from_wks(
+        self,
+        wks,
+        x_col: int,
+        y_col: int,
+        plot_code: int,
+        target_graph: str | None,
+    ) -> str:
+        x = x_col + 1
+        y = y_col + 1
+        data_range = f"{self._worksheet_lt_ref(wks)}!({x},{y})"
+        if target_graph:
+            output_layer = f"[{target_graph}]1!"
+        else:
+            output_layer = "[<new>]"
+        cmd = f"plotxy iy:={data_range} plot:={plot_code} ogl:={output_layer};"
+        self._op.lt_exec(cmd)
+        if target_graph:
+            self._activate_graph(target_graph)
+            return target_graph
+        active = self._active_origin_window_name()
+        if not active:
+            raise OriginAutomationError("Origin did not report the new graph name after plotxy.")
+        return active
+
+    def _worksheet_lt_ref(self, wks) -> str:
+        try:
+            book_name = wks.get_book().name
+        except Exception as exc:
+            raise OriginAutomationError("Could not resolve Origin workbook name.") from exc
+        sheet_name = wks.name
+        return f"[{book_name}]{sheet_name}"
+
+    def _column_index(self, frame: pd.DataFrame, column: str) -> int:
+        try:
+            return int(frame.columns.get_loc(column))
+        except KeyError as exc:
+            raise OriginAutomationError(f"Column not found for Origin plotting: {column}") from exc
+
+    def _graph_name(self, graph) -> str:
+        try:
+            name = str(graph.name)
+            if name:
+                return name
+        except Exception:
+            pass
+        try:
+            graph.activate()
+        except Exception:
+            pass
+        name = self._active_origin_window_name()
+        if not name:
+            raise OriginAutomationError("Could not resolve Origin graph name.")
+        return name
+
+    def _active_origin_window_name(self) -> str:
+        for getter in ("get_lt_str", "lt_str"):
+            try:
+                func = getattr(self._op, getter)
+            except AttributeError:
+                continue
+            try:
+                return str(func("%H"))
+            except Exception:
+                continue
+        return ""
+
+    def _find_graph(self, graph_name: str):
+        try:
+            return self._op.find_graph(graph_name)
+        except Exception:
+            return None
+
+    def _activate_graph(self, graph_name: str) -> None:
+        try:
+            self._op.lt_exec(f'win -a "{graph_name}";')
+        except Exception:
+            pass
+
+    def _plot_list(self, layer) -> list:
+        try:
+            return list(layer.plot_list())
+        except Exception:
+            return []
+
+    def _new_e739_graph(
+        self,
+        title: str,
+        graph_template_path: Path | None,
+        use_default_graph_template: bool,
+    ):
+        template_path = graph_template_path
+        if template_path is None and use_default_graph_template:
+            template_path = self._default_e739_graph_template()
         if template_path is not None and template_path.exists():
             try:
                 graph = self._op.new_graph(lname=title, template=str(template_path.resolve()))
@@ -347,6 +522,17 @@ class OriginClient:
                 label = layer.label(name)
                 if label is not None:
                     layer.remove_label(label)
+            except Exception:
+                pass
+
+    def _clear_layer_plots(self, layer) -> None:
+        try:
+            plots = layer.plot_list()
+        except Exception:
+            return
+        for index in range(len(plots) - 1, -1, -1):
+            try:
+                layer.remove_plot(index)
             except Exception:
                 pass
 
@@ -565,6 +751,25 @@ class OriginClient:
             obj.set_float(prop, value)
         except Exception:
             pass
+
+    def _set_layer_scale(self, layer, xscale: str, yscale: str) -> None:
+        try:
+            layer.xscale = xscale
+        except Exception:
+            pass
+        try:
+            layer.yscale = yscale
+        except Exception:
+            pass
+
+    def _safe_rescale(self, layer) -> None:
+        try:
+            layer.rescale()
+        except Exception:
+            try:
+                layer.lt_exec("layer -r")
+            except Exception:
+                pass
 
     @staticmethod
     def _origin_signed(value: float) -> str:

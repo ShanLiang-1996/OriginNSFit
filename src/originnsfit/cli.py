@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 import re
+import traceback
 
 import pandas as pd
 
@@ -83,6 +84,11 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=None,
         help="Optional Origin graph template (.otp/.otpu) for E739 output graphs.",
+    )
+    parser.add_argument(
+        "--no-graph-template",
+        action="store_true",
+        help="Skip the bundled E739 graph template for older Origin versions.",
     )
     return parser
 
@@ -172,6 +178,7 @@ def _run_e739_analysis(args: argparse.Namespace) -> int:
                 figures_dir=figures_dir,
                 symbol_kind=args.symbol_kind,
                 graph_template_path=args.graph_template,
+                use_default_graph_template=not args.no_graph_template,
             )
             _merge_origin_outputs(summaries, saved_project, figure_records)
             summary_frame = pd.DataFrame(summaries)
@@ -179,8 +186,10 @@ def _run_e739_analysis(args: argparse.Namespace) -> int:
             print(f"Wrote Origin project {saved_project}")
         except OriginAutomationError as exc:
             print(f"Origin automation disabled: {exc}")
+            _write_origin_automation_log(output_dir, str(exc))
         except Exception as exc:
             print(f"Origin automation failed: {exc}")
+            _write_origin_automation_log(output_dir, traceback.format_exc())
         finally:
             if origin is not None:
                 origin.__exit__(None, None, None)
@@ -452,6 +461,12 @@ def _merge_origin_outputs(
         figures = figures_by_label.get(str(summary["label"]), {})
         summary["engineering_figure"] = figures.get("engineering_figure", "")
         summary["linearized_figure"] = figures.get("linearized_figure", "")
+
+
+def _write_origin_automation_log(output_dir: Path, message: str) -> None:
+    log_path = output_dir / "origin_automation.log"
+    log_path.write_text(message.rstrip() + "\n", encoding="utf-8-sig")
+    print(f"Wrote Origin automation log {log_path}")
 
 
 def _safe_name(value: str) -> str:
