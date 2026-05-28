@@ -77,7 +77,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--status",
         help=(
-            "Optional status column. Standard E739 excludes run-out/suspended rows; "
+            "Optional status column. Standard and shifted-log models exclude "
+            "run-out/suspended rows from fitting but keep them for export/plots; "
             "threshold_log_mle treats them as right-censored observations."
         ),
     )
@@ -108,6 +109,16 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Skip the bundled E739 graph template for older Origin versions.",
     )
+    parser.add_argument(
+        "--linearized-graph",
+        action="store_true",
+        help="Also create E739 linearized graphs. By default only engineering graphs are created.",
+    )
+    parser.add_argument(
+        "--no-runout-arrows",
+        action="store_true",
+        help="Hide run-out arrow annotations while keeping run-out scatter points visible.",
+    )
     return parser
 
 
@@ -131,6 +142,7 @@ def _run_e739_analysis(args: argparse.Namespace) -> int:
 
     summaries: list[dict[str, object]] = []
     transformed_frames: list[pd.DataFrame] = []
+    runout_frames: list[pd.DataFrame] = []
     curve_frames: list[pd.DataFrame] = []
     level_frames: list[pd.DataFrame] = []
     origin_jobs: list[OriginE739Job] = []
@@ -169,6 +181,10 @@ def _run_e739_analysis(args: argparse.Namespace) -> int:
                 )
             )
             transformed_frames.append(_with_metadata(fit.data, path, table.sheet, table.group, label))
+            if fit.runout_data is not None and not fit.runout_data.empty:
+                runout_frames.append(
+                    _with_metadata(fit.runout_data, path, table.sheet, table.group, label)
+                )
             curve_frames.append(_with_metadata(fit.curve, path, table.sheet, table.group, label))
             level_frames.append(_with_metadata(fit.level_stats, path, table.sheet, table.group, label))
             origin_jobs.append(OriginE739Job(fit=fit, label=label, title=title))
@@ -179,11 +195,19 @@ def _run_e739_analysis(args: argparse.Namespace) -> int:
 
     summary_path = output_dir / "e739_summary.csv"
     transformed_path = output_dir / "e739_transformed_data.csv"
+    runout_path = output_dir / "e739_runout_data.csv"
     curves_path = output_dir / "e739_curve_bands.csv"
     levels_path = output_dir / "e739_level_stats.csv"
 
     summary_frame = pd.DataFrame(summaries)
-    _write_e739_outputs(summary_frame, transformed_frames, curve_frames, level_frames, output_dir)
+    _write_e739_outputs(
+        summary_frame,
+        transformed_frames,
+        runout_frames,
+        curve_frames,
+        level_frames,
+        output_dir,
+    )
 
     if not args.dry_run:
         project_path = args.project or (output_dir / "e739_analysis.opj")
@@ -198,6 +222,8 @@ def _run_e739_analysis(args: argparse.Namespace) -> int:
                 symbol_kind=args.symbol_kind,
                 graph_template_path=args.graph_template,
                 use_default_graph_template=not args.no_graph_template,
+                include_linearized_graph=args.linearized_graph,
+                show_runout_arrows=not args.no_runout_arrows,
             )
             _merge_origin_outputs(summaries, saved_project, figure_records)
             summary_frame = pd.DataFrame(summaries)
@@ -215,6 +241,8 @@ def _run_e739_analysis(args: argparse.Namespace) -> int:
 
     print(f"Wrote {summary_path}")
     print(f"Wrote {transformed_path}")
+    if runout_path.exists():
+        print(f"Wrote {runout_path}")
     print(f"Wrote {curves_path}")
     print(f"Wrote {levels_path}")
     return 0
@@ -469,6 +497,7 @@ def _with_metadata(
 def _write_e739_outputs(
     summary_frame: pd.DataFrame,
     transformed_frames: list[pd.DataFrame],
+    runout_frames: list[pd.DataFrame],
     curve_frames: list[pd.DataFrame],
     level_frames: list[pd.DataFrame],
     output_dir: Path,
@@ -479,6 +508,16 @@ def _write_e739_outputs(
         index=False,
         encoding="utf-8-sig",
     )
+    if runout_frames:
+        pd.concat(runout_frames, ignore_index=True).to_csv(
+            output_dir / "e739_runout_data.csv",
+            index=False,
+            encoding="utf-8-sig",
+        )
+    else:
+        stale_runout_path = output_dir / "e739_runout_data.csv"
+        if stale_runout_path.exists():
+            stale_runout_path.unlink()
     pd.concat(curve_frames, ignore_index=True).to_csv(
         output_dir / "e739_curve_bands.csv",
         index=False,

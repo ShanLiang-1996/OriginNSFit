@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from importlib import resources
 import math
 from pathlib import Path
+import re
 
 import pandas as pd
 
@@ -27,6 +28,13 @@ class OriginE739Job:
 class ResponsePresentation:
     axis_label: str
     formula_variable: str
+
+
+RUNOUT_TEXT_ARROW_LOG_OFFSET = 1.055
+RUNOUT_TEXT_ARROW_LINEAR_OFFSET_FRACTION = 0.055
+RUNOUT_TEXT_ARROW_LOG_Y_OFFSET = 1.106
+RUNOUT_TEXT_ARROW_LINEAR_Y_OFFSET_FRACTION = 0.012
+RUNOUT_TEXT_ARROW_FONT_SIZE = 18
 
 
 class OriginClient:
@@ -109,22 +117,37 @@ class OriginClient:
         symbol_kind: int = 3,
         graph_template_path: Path | None = None,
         use_default_graph_template: bool = True,
+        include_linearized_graph: bool = False,
+        show_runout_arrows: bool = True,
     ) -> tuple[Path, list[dict[str, str]]]:
         self._op.new(False)
         if not jobs:
             raise OriginAutomationError("No E739 analysis jobs to write to Origin.")
 
         summary_book = self._op.new_book("w", lname="E739 Summary")
+        summary_book.name = self._safe_origin_short_name("E739Summary")
         summary_wks = summary_book[0]
         summary_wks.name = "Summary"
         self._write_frame_to_sheet(summary_wks, summary)
+        self._remove_default_blank_workbook()
 
         figure_records: list[dict[str, str]] = []
         for job in jobs:
             book = self._op.new_book("w", lname=job.title)
+            book.name = self._safe_origin_short_name(job.label, "E739Data")
             data_wks = book[0]
             data_wks.name = "Data"
             self._write_frame_to_sheet(data_wks, job.fit.data)
+
+            failure_frame = self._failure_plot_data(job.fit)
+            failure_wks = book.add_sheet("Failures")
+            self._write_frame_to_sheet(failure_wks, failure_frame)
+
+            runout_frame = self._runout_plot_data(job.fit)
+            runout_wks = None
+            if not runout_frame.empty:
+                runout_wks = book.add_sheet("RunOut")
+                self._write_frame_to_sheet(runout_wks, runout_frame)
 
             curve_wks = book.add_sheet("CurveBand")
             self._write_frame_to_sheet(curve_wks, job.fit.curve)
@@ -139,33 +162,48 @@ class OriginClient:
             record: dict[str, str] = {"label": job.label}
             if figures_dir is not None:
                 engineering_path = figures_dir / f"{job.label}_e739_engineering.png"
-                linearized_path = figures_dir / f"{job.label}_e739_linearized.png"
             else:
                 engineering_path = None
-                linearized_path = None
 
             record["engineering_figure"] = str(
                 self._plot_e739_engineering(
                     job,
-                    data_wks,
+                    failure_wks,
+                    failure_frame,
                     curve_wks,
+                    runout_wks,
+                    runout_frame,
                     engineering_path,
                     symbol_kind,
                     graph_template_path,
                     use_default_graph_template,
+                    show_runout_arrows,
                 )
                 or ""
             )
-            record["linearized_figure"] = str(
-                self._plot_e739_linearized(
-                    job,
-                    data_wks,
-                    curve_wks,
-                    linearized_path,
-                    symbol_kind,
+            record["linearized_figure"] = ""
+            if include_linearized_graph:
+                linearized_path = (
+                    figures_dir / f"{job.label}_e739_linearized.png"
+                    if figures_dir is not None
+                    else None
                 )
-                or ""
-            )
+                record["linearized_figure"] = str(
+                    self._plot_e739_linearized(
+                        job,
+                        failure_wks,
+                        failure_frame,
+                        curve_wks,
+                        runout_wks,
+                        runout_frame,
+                        linearized_path,
+                        symbol_kind,
+                        show_runout_arrows,
+                    )
+                    or ""
+                )
+            elif figures_dir is not None:
+                self._remove_stale_figure(figures_dir / f"{job.label}_e739_linearized.png")
             figure_records.append(record)
 
         saved_project = self._save_project(output_path)
@@ -174,12 +212,16 @@ class OriginClient:
     def _plot_e739_engineering(
         self,
         job: OriginE739Job,
-        data_wks,
+        failure_wks,
+        failure_frame: pd.DataFrame,
         curve_wks,
+        runout_wks,
+        runout_frame: pd.DataFrame,
         output_path: Path | None,
         symbol_kind: int,
         graph_template_path: Path | None,
         use_default_graph_template: bool,
+        show_runout_arrows: bool,
     ) -> Path | None:
         graph = self._new_e739_graph(
             f"{job.title} E739",
@@ -193,51 +235,46 @@ class OriginClient:
 
         self._plotxy_from_wks(
             curve_wks,
-            self._column_index(job.fit.curve, "life_lower_band"),
-            self._column_index(job.fit.curve, "response"),
-            plot_code=200,
-            target_graph=graph_name,
-        )
-        self._plotxy_from_wks(
-            curve_wks,
-            self._column_index(job.fit.curve, "life_upper_band"),
-            self._column_index(job.fit.curve, "response"),
-            plot_code=200,
-            target_graph=graph_name,
-        )
-        self._plotxy_from_wks(
-            curve_wks,
             self._column_index(job.fit.curve, "life_fit"),
             self._column_index(job.fit.curve, "response"),
             plot_code=200,
             target_graph=graph_name,
         )
         self._plotxy_from_wks(
-            data_wks,
-            self._column_index(job.fit.data, "e739_life"),
-            self._column_index(job.fit.data, "e739_response"),
+            failure_wks,
+            self._column_index(failure_frame, "e739_life"),
+            self._column_index(failure_frame, "e739_response"),
             plot_code=201,
             target_graph=graph_name,
         )
+        has_runout = runout_wks is not None and not runout_frame.empty
+        if has_runout:
+            self._plotxy_from_wks(
+                runout_wks,
+                self._column_index(runout_frame, "e739_life"),
+                self._column_index(runout_frame, "e739_response"),
+                plot_code=201,
+                target_graph=graph_name,
+            )
 
         graph = self._find_graph(graph_name) or graph
         layer = graph[0]
         plots = self._plot_list(layer)
-        lower_plot = plots[0] if len(plots) > 0 else None
-        upper_plot = plots[1] if len(plots) > 1 else None
-        fit_plot = plots[2] if len(plots) > 2 else None
-        data_plot = plots[3] if len(plots) > 3 else None
-        if len(plots) < 4:
+        fit_plot = plots[0] if len(plots) > 0 else None
+        data_plot = plots[1] if len(plots) > 1 else None
+        runout_plot = plots[2] if has_runout and len(plots) > 2 else None
+        expected_plots = 3 if has_runout else 2
+        if len(plots) < expected_plots:
             raise OriginAutomationError(
                 f"Origin created only {len(plots)} engineering plot(s) for {job.label}."
             )
 
-        self._style_confidence_plot(lower_plot)
-        self._style_confidence_plot(upper_plot)
         if fit_plot is not None:
             self._safe_plot_cmd(fit_plot, "-c 2", "-w 1000")
         if data_plot is not None:
             self._style_data_plot(data_plot, symbol_kind)
+        if runout_plot is not None:
+            self._style_runout_plot(runout_plot, symbol_kind)
 
         self._set_layer_scale(
             layer,
@@ -254,6 +291,14 @@ class OriginClient:
             self._response_presentation(job.fit.result.response_column).axis_label,
         )
         self._add_e739_engineering_label(layer, job)
+        if has_runout and show_runout_arrows:
+            self._add_runout_text_arrows(
+                layer,
+                runout_frame,
+                x_column="e739_life",
+                y_column="e739_response",
+                log_x=True,
+            )
         if output_path is None:
             return None
         return self._export_graph(graph, output_path)
@@ -261,10 +306,14 @@ class OriginClient:
     def _plot_e739_linearized(
         self,
         job: OriginE739Job,
-        data_wks,
+        failure_wks,
+        failure_frame: pd.DataFrame,
         curve_wks,
+        runout_wks,
+        runout_frame: pd.DataFrame,
         output_path: Path | None,
         symbol_kind: int,
+        show_runout_arrows: bool,
     ) -> Path | None:
         graph = self._op.new_graph(lname=f"{job.title} E739 Linearized")
         if graph is None:
@@ -276,50 +325,45 @@ class OriginClient:
         self._plotxy_from_wks(
             curve_wks,
             self._column_index(job.fit.curve, "e739_x"),
-            self._column_index(job.fit.curve, "log10_life_lower_band"),
-            plot_code=200,
-            target_graph=graph_name,
-        )
-        self._plotxy_from_wks(
-            curve_wks,
-            self._column_index(job.fit.curve, "e739_x"),
-            self._column_index(job.fit.curve, "log10_life_upper_band"),
-            plot_code=200,
-            target_graph=graph_name,
-        )
-        self._plotxy_from_wks(
-            curve_wks,
-            self._column_index(job.fit.curve, "e739_x"),
             self._column_index(job.fit.curve, "log10_life_fit"),
             plot_code=200,
             target_graph=graph_name,
         )
         self._plotxy_from_wks(
-            data_wks,
-            self._column_index(job.fit.data, "e739_x"),
-            self._column_index(job.fit.data, "e739_y_log10_life"),
+            failure_wks,
+            self._column_index(failure_frame, "e739_x"),
+            self._column_index(failure_frame, "e739_y_log10_life"),
             plot_code=201,
             target_graph=graph_name,
         )
+        has_runout = runout_wks is not None and not runout_frame.empty
+        if has_runout:
+            self._plotxy_from_wks(
+                runout_wks,
+                self._column_index(runout_frame, "e739_x"),
+                self._column_index(runout_frame, "e739_y_log10_life"),
+                plot_code=201,
+                target_graph=graph_name,
+            )
 
         graph = self._find_graph(graph_name) or graph
         layer = graph[0]
         plots = self._plot_list(layer)
-        lower_plot = plots[0] if len(plots) > 0 else None
-        upper_plot = plots[1] if len(plots) > 1 else None
-        fit_plot = plots[2] if len(plots) > 2 else None
-        data_plot = plots[3] if len(plots) > 3 else None
-        if len(plots) < 4:
+        fit_plot = plots[0] if len(plots) > 0 else None
+        data_plot = plots[1] if len(plots) > 1 else None
+        runout_plot = plots[2] if has_runout and len(plots) > 2 else None
+        expected_plots = 3 if has_runout else 2
+        if len(plots) < expected_plots:
             raise OriginAutomationError(
                 f"Origin created only {len(plots)} linearized plot(s) for {job.label}."
             )
 
-        self._style_confidence_plot(lower_plot)
-        self._style_confidence_plot(upper_plot)
         if fit_plot is not None:
             self._safe_plot_cmd(fit_plot, "-c 2", "-w 1000")
         if data_plot is not None:
             self._style_data_plot(data_plot, symbol_kind)
+        if runout_plot is not None:
+            self._style_runout_plot(runout_plot, symbol_kind)
 
         self._set_layer_scale(layer, "linear", "linear")
         self._safe_rescale(layer)
@@ -329,6 +373,14 @@ class OriginClient:
         x_label = self._linearized_x_axis_label(job.fit)
         self._set_axis_label_text(layer, x_label, "log10(N)")
         self._add_e739_linearized_label(layer, job)
+        if has_runout and show_runout_arrows:
+            self._add_runout_text_arrows(
+                layer,
+                runout_frame,
+                x_column="e739_x",
+                y_column="e739_y_log10_life",
+                log_x=False,
+            )
         if output_path is None:
             return None
         return self._export_graph(graph, output_path)
@@ -347,18 +399,18 @@ class OriginClient:
             self._safe_set_int(y_label, "verbatim", 0)
 
     def _style_grid(self, layer) -> None:
-        layer.lt_exec(
-            "layer.x.grid.show=3;"
-            "layer.y.grid.show=3;"
-            "layer.x.grid.majorcolor=18;"
-            "layer.y.grid.majorcolor=18;"
-            "layer.x.grid.minorcolor=19;"
-            "layer.y.grid.minorcolor=19;"
-            "layer.x.grid.majorstyle=2;"
-            "layer.y.grid.majorstyle=2;"
-            "layer.x.grid.minorstyle=3;"
-            "layer.y.grid.minorstyle=3"
+        commands = (
+            "axis -ps X G 3;axis -ps Y G 3;",
+            "layer.x.grid.show=3;layer.y.grid.show=3;",
+            "layer.x.grid.majorcolor=18;layer.y.grid.majorcolor=18;",
+            "layer.x.grid.minorcolor=19;layer.y.grid.minorcolor=19;",
+            "layer.x.grid.majortype=2;layer.y.grid.majortype=2;",
+            "layer.x.grid.minortype=3;layer.y.grid.minortype=3;",
+            "layer.x.grid.majorwidth=0.5;layer.y.grid.majorwidth=0.5;",
+            "layer.x.grid.minorwidth=0.25;layer.y.grid.minorwidth=0.25;",
         )
+        for command in commands:
+            self._safe_layer_lt_exec(layer, command)
 
     def _add_formula_label(
         self,
@@ -396,11 +448,34 @@ class OriginClient:
             pass
         self._safe_plot_cmd(plot, "-c 1", "-w 1500")
 
+    def _style_runout_plot(self, plot, symbol_kind: int) -> None:
+        try:
+            plot.symbol_kind = symbol_kind
+            plot.symbol_size = 15
+            plot.symbol_interior = 1
+        except Exception:
+            pass
+        self._safe_plot_cmd(plot, "-c 1", "-w 1500")
+
     def _safe_plot_cmd(self, plot, *commands: str) -> None:
         try:
             plot.set_cmd(*commands)
         except Exception:
             pass
+
+    def _safe_layer_lt_exec(self, layer, command: str) -> None:
+        self._try_layer_lt_exec(layer, command)
+
+    def _try_layer_lt_exec(self, layer, command: str) -> bool:
+        try:
+            layer.lt_exec(command)
+            return True
+        except Exception:
+            try:
+                self._op.lt_exec(command)
+                return True
+            except Exception:
+                return False
 
     def _plotxy_from_wks(
         self,
@@ -426,6 +501,75 @@ class OriginClient:
         if not active:
             raise OriginAutomationError("Origin did not report the new graph name after plotxy.")
         return active
+
+    def _remove_default_blank_workbook(self) -> None:
+        try:
+            book = self._op.find_book("w", "Book1")
+        except Exception:
+            book = None
+        if book is None:
+            return
+        try:
+            if str(book.name) != "Book1":
+                return
+        except Exception:
+            return
+        if self._workbook_has_data(book):
+            return
+        try:
+            book.destroy()
+        except Exception:
+            try:
+                self._op.lt_exec("win -cd Book1;")
+            except Exception:
+                pass
+
+    @staticmethod
+    def _workbook_has_data(book) -> bool:
+        try:
+            sheets = list(book)
+        except Exception:
+            return True
+        if not sheets:
+            return False
+        for sheet in sheets:
+            try:
+                if int(sheet.rows) > 0:
+                    return True
+            except Exception:
+                return True
+        return False
+
+    @staticmethod
+    def _remove_stale_figure(path: Path) -> None:
+        try:
+            if path.exists():
+                path.unlink()
+        except OSError:
+            pass
+
+    @staticmethod
+    def _safe_origin_short_name(text: str, fallback: str = "OriginNSFit") -> str:
+        name = re.sub(r"[^A-Za-z0-9_]", "_", str(text)).strip("_")
+        if not name:
+            name = fallback
+        if name[0].isdigit():
+            name = f"W_{name}"
+        return name[:24]
+
+    @staticmethod
+    def _failure_plot_data(fit: E739Fit) -> pd.DataFrame:
+        if "e739_is_failure" not in fit.data.columns:
+            return fit.data.copy()
+        return fit.data[fit.data["e739_is_failure"].astype(bool)].copy()
+
+    @staticmethod
+    def _runout_plot_data(fit: E739Fit) -> pd.DataFrame:
+        if fit.runout_data is not None and not fit.runout_data.empty:
+            return fit.runout_data.copy()
+        if "e739_is_failure" not in fit.data.columns:
+            return fit.data.iloc[0:0].copy()
+        return fit.data[~fit.data["e739_is_failure"].astype(bool)].copy()
 
     def _worksheet_lt_ref(self, wks) -> str:
         try:
@@ -537,15 +681,28 @@ class OriginClient:
                 pass
 
     def _set_e739_engineering_limits(self, layer, fit: E739Fit) -> None:
-        x_min = min(float(fit.curve["life_lower_band"].min()), fit.result.life_min)
-        x_max = max(float(fit.curve["life_upper_band"].max()), fit.result.life_max)
+        runout_frame = self._runout_plot_data(fit)
+        x_candidates = [
+            float(fit.curve["life_fit"].min()),
+            float(fit.curve["life_fit"].max()),
+            fit.result.life_min,
+            fit.result.life_max,
+        ]
+        y_candidates = [fit.result.response_min, fit.result.response_max]
+        if not runout_frame.empty:
+            runout_life = runout_frame["e739_life"].astype(float)
+            runout_response = runout_frame["e739_response"].astype(float)
+            x_candidates.extend([float(runout_life.min()), float((runout_life * 1.25).max())])
+            y_candidates.extend([float(runout_response.min()), float(runout_response.max())])
+        x_min = min(x_candidates)
+        x_max = max(x_candidates)
         self._safe_set_xlim(layer, *self._expanded_log_limits(x_min, x_max, pad=0.06))
         if fit.result.x_transform == "log":
             self._safe_set_ylim(
                 layer,
                 *self._expanded_log_limits(
-                    fit.result.response_min,
-                    fit.result.response_max,
+                    min(y_candidates),
+                    max(y_candidates),
                     pad=0.08,
                 )
             )
@@ -553,25 +710,40 @@ class OriginClient:
             self._safe_set_ylim(
                 layer,
                 *self._expanded_linear_limits(
-                    fit.result.response_min,
-                    fit.result.response_max,
+                    min(y_candidates),
+                    max(y_candidates),
                     pad=0.08,
                 )
             )
 
     def _set_e739_linearized_limits(self, layer, fit: E739Fit) -> None:
+        runout_frame = self._runout_plot_data(fit)
+        x_min = fit.result.x_min
+        x_max = fit.result.x_max
+        if not runout_frame.empty:
+            runout_x = runout_frame["e739_x"].astype(float)
+            x_min = min(x_min, float(runout_x.min()))
+            x_max = max(x_max, float(runout_x.max()))
         self._safe_set_xlim(
             layer,
-            *self._expanded_linear_limits(fit.result.x_min, fit.result.x_max, pad=0.06),
+            *self._expanded_linear_limits(
+                x_min,
+                x_max,
+                pad=0.12 if not runout_frame.empty else 0.06,
+            ),
         )
         y_min = min(
             float(fit.data["e739_y_log10_life"].min()),
-            float(fit.curve["log10_life_lower_band"].min()),
+            float(fit.curve["log10_life_fit"].min()),
         )
         y_max = max(
             float(fit.data["e739_y_log10_life"].max()),
-            float(fit.curve["log10_life_upper_band"].max()),
+            float(fit.curve["log10_life_fit"].max()),
         )
+        if not runout_frame.empty:
+            runout_y = runout_frame["e739_y_log10_life"].astype(float)
+            y_min = min(y_min, float(runout_y.min()))
+            y_max = max(y_max, float(runout_y.max()))
         self._safe_set_ylim(layer, *self._expanded_linear_limits(y_min, y_max, pad=0.08))
 
     def _delete_legend(self, layer) -> None:
@@ -599,7 +771,6 @@ class OriginClient:
             f"{job.title}\n"
             f"log10(N) = {fit.result.coefficient_a:.6g} "
             f"{self._origin_signed(fit.result.coefficient_b)} X\n"
-            f"{fit.result.confidence:.0%} confidence band, "
             f"R\\+(2) = {fit.result.r2:.5f}"
         )
         self._add_layer_label(layer, text, x_position, y_position)
@@ -619,10 +790,7 @@ class OriginClient:
             y_position = fit.result.response_min + 0.82 * (
                 fit.result.response_max - fit.result.response_min
             )
-        text = (
-            f"{self._origin_life_response_formula(fit)}\n"
-            f"{fit.result.confidence:.0%} 置信带"
-        )
+        text = self._origin_life_response_formula(fit)
         self._add_layer_label(layer, text, x_position, y_position)
 
     def _add_layer_label(self, layer, text: str, x_position: float, y_position: float) -> None:
@@ -632,6 +800,74 @@ class OriginClient:
             self._safe_set_int(label, "attach", 2)
             self._safe_set_float(label, "x1", x_position)
             self._safe_set_float(label, "y1", y_position)
+
+    def _add_runout_text_arrows(
+        self,
+        layer,
+        runout_frame: pd.DataFrame,
+        *,
+        x_column: str,
+        y_column: str,
+        log_x: bool,
+    ) -> None:
+        offset = self._runout_text_arrow_offset(runout_frame[x_column], log_x)
+        for _, row in runout_frame.iterrows():
+            try:
+                x_value = float(row[x_column])
+                y_value = float(row[y_column])
+            except (TypeError, ValueError):
+                continue
+            if not math.isfinite(x_value) or not math.isfinite(y_value):
+                continue
+            x_position = x_value * offset if log_x else x_value + offset
+            y_position = self._runout_text_arrow_y_position(
+                runout_frame[y_column],
+                y_value,
+                log_y=self._axis_is_log(layer, "y"),
+            )
+            label = layer.add_label("\\x(2192)", x_position, y_position)
+            if label is not None:
+                self._safe_set_int(label, "verbatim", 0)
+                self._safe_set_int(label, "attach", 2)
+                self._safe_set_int(label, "fsize", RUNOUT_TEXT_ARROW_FONT_SIZE)
+                self._safe_set_float(label, "x1", x_position)
+                self._safe_set_float(label, "y1", y_position)
+
+    @staticmethod
+    def _runout_text_arrow_offset(values: pd.Series, log_x: bool) -> float:
+        numeric = pd.to_numeric(values, errors="coerce").dropna()
+        if numeric.empty:
+            return RUNOUT_TEXT_ARROW_LOG_OFFSET if log_x else RUNOUT_TEXT_ARROW_LINEAR_OFFSET_FRACTION
+        if log_x:
+            return RUNOUT_TEXT_ARROW_LOG_OFFSET
+        span = float(numeric.max() - numeric.min())
+        if span <= 0.0:
+            span = abs(float(numeric.iloc[0])) or 1.0
+        return RUNOUT_TEXT_ARROW_LINEAR_OFFSET_FRACTION * span
+
+    @staticmethod
+    def _runout_text_arrow_y_position(
+        values: pd.Series,
+        y_value: float,
+        *,
+        log_y: bool,
+    ) -> float:
+        if log_y and y_value > 0.0:
+            return y_value * RUNOUT_TEXT_ARROW_LOG_Y_OFFSET
+        numeric = pd.to_numeric(values, errors="coerce").dropna()
+        if numeric.empty:
+            return y_value
+        span = float(numeric.max() - numeric.min())
+        if span <= 0.0:
+            span = abs(float(numeric.iloc[0])) or 1.0
+        return y_value + RUNOUT_TEXT_ARROW_LINEAR_Y_OFFSET_FRACTION * span
+
+    def _axis_is_log(self, layer, axis: str) -> bool:
+        attr = "yscale" if axis == "y" else "xscale"
+        try:
+            return str(getattr(layer, attr)).lower() == "log10"
+        except Exception:
+            return False
 
     def _export_graph(self, graph, output_path: Path) -> Path:
         output_path.parent.mkdir(parents=True, exist_ok=True)

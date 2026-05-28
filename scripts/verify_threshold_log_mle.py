@@ -65,6 +65,21 @@ def main_verify() -> None:
     assert mle_failure_only.result.coefficient_b < 0.0
 
     censored = _synthetic_data(with_runout=True)
+    runout_count = int((censored["status"] == "runout").sum())
+    standard_censored = fit_e739(censored, "N", "S", status_column="status")
+    explicit_failures = fit_e739(censored[censored["status"] == "failure"], "N", "S")
+    assert standard_censored.result.n_runout == runout_count
+    assert standard_censored.runout_data is not None
+    assert len(standard_censored.runout_data) == runout_count
+    assert bool(standard_censored.data["e739_is_failure"].all())
+    assert not bool(standard_censored.runout_data["e739_is_failure"].any())
+    assert abs(
+        standard_censored.result.coefficient_a - explicit_failures.result.coefficient_a
+    ) < 1e-12
+    assert abs(
+        standard_censored.result.coefficient_b - explicit_failures.result.coefficient_b
+    ) < 1e-12
+
     mle_censored = fit_e739(
         censored,
         "N",
@@ -130,8 +145,41 @@ def main_verify() -> None:
             assert column in summary.columns
         assert summary.loc[0, "model"] == "threshold_log_mle"
         assert int(summary.loc[0, "n_runout"]) == mle_censored.result.n_runout
+        runout_export = pd.read_csv(output_dir / "e739_runout_data.csv", encoding="utf-8-sig")
+        assert len(runout_export) == mle_censored.result.n_runout
 
-    print("threshold_log_mle verification passed")
+    with tempfile.TemporaryDirectory() as temp_dir:
+        temp_path = Path(temp_dir)
+        input_dir = temp_path / "input"
+        output_dir = temp_path / "output"
+        input_dir.mkdir()
+        censored.to_csv(input_dir / "standard.csv", index=False, encoding="utf-8-sig")
+        exit_code = main(
+            [
+                "--input",
+                str(input_dir),
+                "--output",
+                str(output_dir),
+                "--pattern",
+                "*.csv",
+                "--life",
+                "N",
+                "--response",
+                "S",
+                "--status",
+                "status",
+                "--dry-run",
+            ]
+        )
+        assert exit_code == 0
+        summary = pd.read_csv(output_dir / "e739_summary.csv", encoding="utf-8-sig")
+        runout_export = pd.read_csv(output_dir / "e739_runout_data.csv", encoding="utf-8-sig")
+        assert int(summary.loc[0, "n_runout"]) == runout_count
+        assert len(runout_export) == runout_count
+        assert "e739_is_failure" in runout_export.columns
+        assert not bool(runout_export["e739_is_failure"].astype(bool).any())
+
+    print("E739 run-out and threshold_log_mle verification passed")
 
 
 if __name__ == "__main__":

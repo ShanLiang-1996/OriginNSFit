@@ -127,6 +127,7 @@ class E739Fit:
     data: pd.DataFrame
     curve: pd.DataFrame
     level_stats: pd.DataFrame
+    runout_data: pd.DataFrame | None = None
 
 
 def fit_e739(
@@ -177,6 +178,7 @@ def fit_e739(
     if dropped_missing:
         warnings.append(f"Dropped {dropped_missing} row(s) with missing numeric life/response.")
 
+    runout_data = pd.DataFrame(columns=data.columns)
     n_runout: int | None = None
     if status_column:
         status = data[status_column].map(_status_is_failure)
@@ -185,10 +187,12 @@ def fit_e739(
             n_runout = int((~status).sum())
         else:
             excluded = int((~status).sum())
+            runout_data = data[~status].copy()
             data = data[status].copy()
             if excluded:
                 warnings.append(
-                    "Excluded run-out/suspended row(s); E739 OLS applies only to failure data."
+                    "Excluded run-out/suspended row(s) from the OLS fit; retained them "
+                    "for run-out exports and plot markers."
                 )
     elif model == "threshold_log_mle":
         data["e739_is_failure"] = True
@@ -215,8 +219,8 @@ def fit_e739(
             )
     else:
         failure_mask = None
-        n_failure = None
-        n_runout = None
+        n_failure = len(data)
+        n_runout = len(runout_data)
 
     parameter_count = 4 if model == "threshold_log_mle" else 3 if model == "shifted-log" else 2
     if len(data) <= parameter_count:
@@ -330,7 +334,26 @@ def fit_e739(
     data["e739_residual_log10_life"] = residual
     data["e739_life_fit"] = np.power(10.0, y_hat)
     data["e739_abs_residual_log10_life"] = np.abs(residual)
+    if "e739_is_failure" not in data.columns:
+        data["e739_is_failure"] = True
     data["e739_level"] = _level_values(data, level_column, replicate_decimals)
+
+    if model == "threshold_log_mle":
+        runout_data = data[~data["e739_is_failure"].astype(bool)].copy()
+    else:
+        runout_data = _prepare_runout_data(
+            runout_data,
+            level_column,
+            replicate_decimals,
+            coefficient_a,
+            coefficient_b,
+            coefficient_c,
+            model,
+            x_transform,
+            warnings,
+        )
+        n_runout = len(runout_data)
+        n_failure = len(data)
 
     level_data = data[data["e739_is_failure"]].copy() if model == "threshold_log_mle" else data
     level_stats = _level_statistics(level_data, coefficient_a, coefficient_b)
@@ -352,7 +375,14 @@ def fit_e739(
     levels = max(1, len(level_stats))
     replication_percent = float(100.0 * (1.0 - levels / k))
 
-    x_grid = np.linspace(float(np.min(x)), float(np.max(x)), fit_points)
+    curve_x_values = _curve_domain_values(
+        data,
+        runout_data,
+        x,
+        coefficient_a,
+        coefficient_b,
+    )
+    x_grid = np.linspace(float(np.min(curve_x_values)), float(np.max(curve_x_values)), fit_points)
     y_grid = coefficient_a + coefficient_b * x_grid
     if model == "threshold_log_mle":
         band_delta = _threshold_log_mle_band_delta(
@@ -502,7 +532,13 @@ def fit_e739(
         warnings=tuple(warnings),
         linearity_test=linearity_test,
     )
-    return E739Fit(result=result, data=data.reset_index(drop=True), curve=curve, level_stats=level_stats)
+    return E739Fit(
+        result=result,
+        data=data.reset_index(drop=True),
+        curve=curve,
+        level_stats=level_stats,
+        runout_data=runout_data.reset_index(drop=True),
+    )
 
 
 def _normalize_confidence(confidence: float) -> float:
@@ -517,6 +553,88 @@ def _normalize_confidence(confidence: float) -> float:
 def _require_column(frame: pd.DataFrame, column: str, role: str) -> None:
     if column not in frame.columns:
         raise ValueError(f"E739 {role} column not found: {column}")
+
+
+def _prepare_runout_data(
+    runout_data: pd.DataFrame,
+    level_column: str | None,
+    replicate_decimals: int,
+    coefficient_a: float,
+    coefficient_b: float,
+    coefficient_c: float | None,
+    model: E739Model,
+    x_transform: E739Transform,
+    warnings: list[str],
+) -> pd.DataFrame:
+    """Transform run-out rows for export and plotting without using them in OLS fitting."""
+    if runout_data.empty:
+        return runout_data.copy()
+
+    prepared = runout_data.copy()
+    before_domain_rows = len(prepared)
+    domain_mask = prepared["e739_life"] > 0
+    if model in ("shifted-log", "threshold_log_mle"):
+        if coefficient_c is None:
+            return prepared.iloc[0:0].copy()
+        domain_mask &= prepared["e739_response"] > coefficient_c
+    elif x_transform == "log":
+        domain_mask &= prepared["e739_response"] > 0
+
+    prepared = prepared[domain_mask].copy()
+    dropped = before_domain_rows - len(prepared)
+    if dropped:
+        warnings.append(
+            f"Dropped {dropped} run-out row(s) outside the positive/model domain for plotting."
+        )
+    if prepared.empty:
+        return prepared
+
+    response = prepared["e739_response"].to_numpy(dtype=float)
+    y = np.log10(prepared["e739_life"].to_numpy(dtype=float))
+    if model in ("shifted-log", "threshold_log_mle"):
+        x = np.log10(response - float(coefficient_c))
+    elif x_transform == "log":
+        x = np.log10(response)
+    else:
+        x = response
+    y_hat = coefficient_a + coefficient_b * x
+    residual = y - y_hat
+
+    prepared["e739_is_failure"] = False
+    prepared["e739_y_log10_life"] = y
+    prepared["e739_x"] = x
+    prepared["e739_yhat_log10_life"] = y_hat
+    prepared["e739_residual_log10_life"] = residual
+    prepared["e739_life_fit"] = np.power(10.0, y_hat)
+    prepared["e739_abs_residual_log10_life"] = np.abs(residual)
+    prepared["e739_level"] = _level_values(prepared, level_column, replicate_decimals)
+    return prepared
+
+
+def _curve_domain_values(
+    data: pd.DataFrame,
+    runout_data: pd.DataFrame,
+    fitted_x: np.ndarray,
+    coefficient_a: float,
+    coefficient_b: float,
+) -> np.ndarray:
+    """Return curve X-domain values spanning fit responses and observed lives."""
+    values: list[np.ndarray] = [np.asarray(fitted_x, dtype=float)]
+    if not runout_data.empty and "e739_x" in runout_data:
+        values.append(runout_data["e739_x"].to_numpy(dtype=float))
+
+    y_frames = [data["e739_y_log10_life"]]
+    if not runout_data.empty and "e739_y_log10_life" in runout_data:
+        y_frames.append(runout_data["e739_y_log10_life"])
+    if abs(coefficient_b) > 1e-15:
+        y_values = pd.concat(y_frames, ignore_index=True).to_numpy(dtype=float)
+        values.append((y_values - coefficient_a) / coefficient_b)
+
+    combined = np.concatenate(values)
+    combined = combined[np.isfinite(combined)]
+    if combined.size == 0:
+        return np.asarray(fitted_x, dtype=float)
+    return combined
 
 
 def _fit_shifted_log_response(response: np.ndarray, y: np.ndarray) -> dict[str, object]:
