@@ -9,7 +9,13 @@ from scipy import optimize, stats
 
 
 E739Transform = Literal["log", "linear"]
-E739Model = Literal["standard", "shifted-log"]
+E739Model = Literal[
+    "standard",
+    "shifted-log",
+    "threshold_log_mle",
+    "log_threshold_censored_mle",
+]
+THRESHOLD_LOG_MLE_MODELS = {"threshold_log_mle", "log_threshold_censored_mle"}
 
 FAILURE_STATUS_MARKERS = (
     "failure",
@@ -29,6 +35,10 @@ NON_FAILURE_STATUS_MARKERS = (
     "suspension",
     "censored",
     "right-censored",
+    "no",
+    "false",
+    "0",
+    "0.0",
 )
 
 
@@ -55,6 +65,7 @@ class E739FitResult:
     life_column: str
     response_column: str
     model: E739Model
+    model_name: str
     confidence: float
     x_transform: E739Transform
     parameter_count: int
@@ -63,6 +74,7 @@ class E739FitResult:
     coefficient_a: float
     coefficient_b: float
     coefficient_c: float | None
+    threshold: float | None
     x_mean: float
     y_mean: float
     sxx: float
@@ -84,6 +96,8 @@ class E739FitResult:
     coefficient_b_upper: float
     coefficient_c_lower: float | None
     coefficient_c_upper: float | None
+    sigma_lower: float | None
+    sigma_upper: float | None
     x_min: float
     x_max: float
     life_min: float
@@ -93,6 +107,12 @@ class E739FitResult:
     replication_percent: float
     life_response_coefficient_a: float
     life_response_coefficient_b: float
+    log_likelihood: float | None
+    negative_log_likelihood: float | None
+    n_failure: int | None
+    n_runout: int | None
+    success: bool | None
+    optimizer_message: str
     log_life_formula: str
     life_formula: str
     life_response_formula: str
@@ -124,12 +144,17 @@ def fit_e739(
 ) -> E739Fit:
     """Fit an ASTM E739-style linearized S-N/epsilon-N relation."""
     confidence = _normalize_confidence(confidence)
-    if model not in ("standard", "shifted-log"):
-        raise ValueError("model must be 'standard' or 'shifted-log'.")
+    if model not in ("standard", "shifted-log", *THRESHOLD_LOG_MLE_MODELS):
+        raise ValueError(
+            "model must be 'standard', 'shifted-log', 'threshold_log_mle', "
+            "or 'log_threshold_censored_mle'."
+        )
+    if model == "log_threshold_censored_mle":
+        model = "threshold_log_mle"
     if x_transform not in ("log", "linear"):
         raise ValueError("x_transform must be 'log' or 'linear'.")
-    if model == "shifted-log" and x_transform != "log":
-        raise ValueError("The shifted-log model requires --e739-x-transform log.")
+    if model in ("shifted-log", "threshold_log_mle") and x_transform != "log":
+        raise ValueError(f"The {model} model requires --e739-x-transform log.")
     if fit_points < 2:
         raise ValueError("fit_points must be at least 2.")
     _require_column(frame, life_column, "life")
@@ -152,14 +177,22 @@ def fit_e739(
     if dropped_missing:
         warnings.append(f"Dropped {dropped_missing} row(s) with missing numeric life/response.")
 
+    n_runout: int | None = None
     if status_column:
         status = data[status_column].map(_status_is_failure)
-        excluded = int((~status).sum())
-        data = data[status].copy()
-        if excluded:
-            warnings.append(
-                "Excluded run-out/suspended row(s); E739 OLS applies only to failure data."
-            )
+        if model == "threshold_log_mle":
+            data["e739_is_failure"] = status.astype(bool)
+            n_runout = int((~status).sum())
+        else:
+            excluded = int((~status).sum())
+            data = data[status].copy()
+            if excluded:
+                warnings.append(
+                    "Excluded run-out/suspended row(s); E739 OLS applies only to failure data."
+                )
+    elif model == "threshold_log_mle":
+        data["e739_is_failure"] = True
+        n_runout = 0
 
     before_domain_rows = len(data)
     positive_mask = data["e739_life"] > 0
@@ -172,12 +205,27 @@ def fit_e739(
             f"Dropped {dropped_nonpositive} row(s) outside the positive domain required by the model."
         )
 
-    parameter_count = 3 if model == "shifted-log" else 2
+    if model == "threshold_log_mle":
+        failure_mask = data["e739_is_failure"].astype(bool).to_numpy()
+        n_failure = int(np.sum(failure_mask))
+        n_runout = int(len(failure_mask) - n_failure)
+        if n_runout:
+            warnings.append(
+                "Included run-out/suspended row(s) as right-censored observations in MLE."
+            )
+    else:
+        failure_mask = None
+        n_failure = None
+        n_runout = None
+
+    parameter_count = 4 if model == "threshold_log_mle" else 3 if model == "shifted-log" else 2
     if len(data) <= parameter_count:
         raise ValueError(
             f"At least {parameter_count + 1} valid failure points are required "
             f"for the {model} E739 analysis."
         )
+    if model == "threshold_log_mle" and (n_failure is None or n_failure < 3):
+        raise ValueError("At least three failure points are required to initialize threshold MLE.")
 
     data["e739_y_log10_life"] = np.log10(data["e739_life"].to_numpy(dtype=float))
 
@@ -187,8 +235,37 @@ def fit_e739(
     y_mean = float(np.mean(y))
     y_delta = y - y_mean
     total_sum_squares = float(np.sum(y_delta**2))
+    log_likelihood = None
+    negative_log_likelihood = None
+    optimizer_success = None
+    optimizer_message = ""
+    standard_error_sigma = None
+    sigma_confidence_interval: tuple[float, float] | None = None
 
-    if model == "shifted-log":
+    if model == "threshold_log_mle":
+        fit_state = _fit_threshold_log_mle(response, y, failure_mask)
+        coefficient_a = fit_state["coefficient_a"]
+        coefficient_b = fit_state["coefficient_b"]
+        coefficient_c = fit_state["coefficient_c"]
+        x = fit_state["x"]
+        y_hat = fit_state["y_hat"]
+        residual = fit_state["residual"]
+        covariance = fit_state["covariance"]
+        covariance_mean = fit_state["covariance_mean"]
+        sxx = fit_state["sxx"]
+        sxy = fit_state["sxy"]
+        x_mean = fit_state["x_mean"]
+        standard_error_a = fit_state["standard_error_a"]
+        standard_error_b = fit_state["standard_error_b"]
+        standard_error_c = fit_state["standard_error_c"]
+        standard_error_sigma = fit_state["standard_error_sigma"]
+        sigma = fit_state["sigma"]
+        sigma_squared = sigma**2
+        log_likelihood = fit_state["log_likelihood"]
+        negative_log_likelihood = fit_state["negative_log_likelihood"]
+        optimizer_success = fit_state["success"]
+        optimizer_message = fit_state["optimizer_message"]
+    elif model == "shifted-log":
         fit_state = _fit_shifted_log_response(response, y)
         coefficient_a = fit_state["coefficient_a"]
         coefficient_b = fit_state["coefficient_b"]
@@ -197,6 +274,7 @@ def fit_e739(
         y_hat = fit_state["y_hat"]
         residual = fit_state["residual"]
         covariance = fit_state["covariance"]
+        covariance_mean = covariance
         sxx = fit_state["sxx"]
         sxy = fit_state["sxy"]
         x_mean = fit_state["x_mean"]
@@ -207,6 +285,7 @@ def fit_e739(
         coefficient_c = None
         standard_error_c = None
         covariance = None
+        covariance_mean = None
         if x_transform == "log":
             x = np.log10(response)
         else:
@@ -228,8 +307,9 @@ def fit_e739(
     residual = y - y_hat
     residual_sum_squares = float(np.sum(residual**2))
     degrees_of_freedom = k - parameter_count
-    sigma_squared = residual_sum_squares / degrees_of_freedom
-    sigma = float(np.sqrt(sigma_squared))
+    if model != "threshold_log_mle":
+        sigma_squared = residual_sum_squares / degrees_of_freedom
+        sigma = float(np.sqrt(sigma_squared))
     r2 = 1.0 if total_sum_squares == 0 else 1.0 - residual_sum_squares / total_sum_squares
     rmse_log_life = float(np.sqrt(np.mean(residual**2)))
     if model == "standard":
@@ -237,8 +317,14 @@ def fit_e739(
         standard_error_b = float(sigma / np.sqrt(sxx))
 
     t_critical = float(stats.t.ppf((1.0 + confidence) / 2.0, degrees_of_freedom))
-    f_band_critical = float(stats.f.ppf(confidence, parameter_count, degrees_of_freedom))
-    simultaneous_band_factor = float(np.sqrt(parameter_count * f_band_critical))
+    if standard_error_sigma is not None:
+        sigma_confidence_interval = (
+            max(0.0, float(sigma - t_critical * standard_error_sigma)),
+            float(sigma + t_critical * standard_error_sigma),
+        )
+    band_parameter_count = 3 if model == "threshold_log_mle" else parameter_count
+    f_band_critical = float(stats.f.ppf(confidence, band_parameter_count, degrees_of_freedom))
+    simultaneous_band_factor = float(np.sqrt(band_parameter_count * f_band_critical))
 
     data["e739_yhat_log10_life"] = y_hat
     data["e739_residual_log10_life"] = residual
@@ -246,21 +332,36 @@ def fit_e739(
     data["e739_abs_residual_log10_life"] = np.abs(residual)
     data["e739_level"] = _level_values(data, level_column, replicate_decimals)
 
-    level_stats = _level_statistics(data, coefficient_a, coefficient_b)
-    linearity_test = _linearity_test(
-        data,
-        level_stats,
-        confidence,
-        coefficient_a,
-        coefficient_b,
-        parameter_count,
-    )
+    level_data = data[data["e739_is_failure"]].copy() if model == "threshold_log_mle" else data
+    level_stats = _level_statistics(level_data, coefficient_a, coefficient_b)
+    if model == "threshold_log_mle":
+        linearity_test = _unavailable_linearity_test(
+            data,
+            level_stats,
+            "Linearity F test is not defined for censored threshold-log MLE.",
+        )
+    else:
+        linearity_test = _linearity_test(
+            data,
+            level_stats,
+            confidence,
+            coefficient_a,
+            coefficient_b,
+            parameter_count,
+        )
     levels = max(1, len(level_stats))
     replication_percent = float(100.0 * (1.0 - levels / k))
 
     x_grid = np.linspace(float(np.min(x)), float(np.max(x)), fit_points)
     y_grid = coefficient_a + coefficient_b * x_grid
-    if model == "shifted-log":
+    if model == "threshold_log_mle":
+        band_delta = _threshold_log_mle_band_delta(
+            x_grid,
+            coefficient_b,
+            covariance_mean,
+            simultaneous_band_factor,
+        )
+    elif model == "shifted-log":
         band_delta = _shifted_log_band_delta(
             x_grid,
             coefficient_b,
@@ -273,7 +374,7 @@ def fit_e739(
             * sigma
             * np.sqrt(1.0 / k + np.power(x_grid - x_mean, 2) / sxx)
         )
-    if model == "shifted-log":
+    if model in ("shifted-log", "threshold_log_mle"):
         response_grid = coefficient_c + np.power(10.0, x_grid)
     elif x_transform == "log":
         response_grid = np.power(10.0, x_grid)
@@ -336,6 +437,7 @@ def fit_e739(
         life_column=life_column,
         response_column=response_column,
         model=model,
+        model_name=model,
         confidence=confidence,
         x_transform=x_transform,
         parameter_count=parameter_count,
@@ -344,6 +446,7 @@ def fit_e739(
         coefficient_a=float(coefficient_a),
         coefficient_b=float(coefficient_b),
         coefficient_c=None if coefficient_c is None else float(coefficient_c),
+        threshold=None if coefficient_c is None else float(coefficient_c),
         x_mean=x_mean,
         y_mean=y_mean,
         sxx=sxx,
@@ -373,6 +476,8 @@ def fit_e739(
             if coefficient_c is None or standard_error_c is None
             else float(coefficient_c + t_critical * standard_error_c)
         ),
+        sigma_lower=None if sigma_confidence_interval is None else sigma_confidence_interval[0],
+        sigma_upper=None if sigma_confidence_interval is None else sigma_confidence_interval[1],
         x_min=float(np.min(x)),
         x_max=float(np.max(x)),
         life_min=float(data["e739_life"].min()),
@@ -382,6 +487,14 @@ def fit_e739(
         replication_percent=replication_percent,
         life_response_coefficient_a=life_response_coefficient_a,
         life_response_coefficient_b=life_response_coefficient_b,
+        log_likelihood=None if log_likelihood is None else float(log_likelihood),
+        negative_log_likelihood=(
+            None if negative_log_likelihood is None else float(negative_log_likelihood)
+        ),
+        n_failure=n_failure,
+        n_runout=n_runout,
+        success=optimizer_success,
+        optimizer_message=optimizer_message,
         log_life_formula=log_life_formula,
         life_formula=life_formula,
         life_response_formula=life_response_formula,
@@ -530,6 +643,205 @@ def _shifted_log_band_delta(
     return simultaneous_band_factor * np.sqrt(np.maximum(variances, 0.0))
 
 
+def _fit_threshold_log_mle(
+    response: np.ndarray,
+    y: np.ndarray,
+    failure_mask: np.ndarray,
+) -> dict[str, object]:
+    response_min = float(np.min(response))
+    if response_min <= 0.0:
+        raise ValueError("threshold_log_mle requires all response values to be positive.")
+    epsilon = max(response_min * 1e-10, 1e-15)
+    c_lower = 0.0
+    c_upper = response_min - epsilon
+    if c_upper <= c_lower:
+        raise ValueError("threshold_log_mle requires min(response) to be greater than zero.")
+
+    failures = np.asarray(failure_mask, dtype=bool)
+    response_fail = response[failures]
+    y_fail = y[failures]
+    if len(y_fail) < 3:
+        raise ValueError("At least three failure points are required for threshold_log_mle.")
+
+    c_seeds = [0.0, 0.02 * response_min, 0.1 * response_min, 0.3 * response_min]
+    c_seeds = [min(max(seed, c_lower), c_upper) for seed in c_seeds]
+    c_seeds = list(dict.fromkeys(round(seed, 15) for seed in c_seeds))
+
+    best_result: optimize.OptimizeResult | None = None
+    for c_initial in c_seeds:
+        a_initial, b_initial = _linear_parameters_for_shift(response_fail, y_fail, c_initial)
+        if b_initial >= 0.0:
+            b_initial = -1.0 if b_initial == 0.0 else -abs(b_initial)
+        residual = y_fail - (a_initial + b_initial * np.log10(response_fail - c_initial))
+        sigma_initial = float(np.std(residual, ddof=1)) if len(residual) > 1 else 0.1
+        if not np.isfinite(sigma_initial) or sigma_initial <= 1e-8:
+            sigma_initial = 0.1
+        initial = np.array(
+            [
+                a_initial,
+                np.log(max(-b_initial, 1e-8)),
+                c_initial,
+                np.log(sigma_initial),
+            ],
+            dtype=float,
+        )
+        result = optimize.minimize(
+            _threshold_log_mle_negative_log_likelihood,
+            initial,
+            args=(response, y, failures),
+            method="L-BFGS-B",
+            bounds=[
+                (None, None),
+                (-50.0, 50.0),
+                (c_lower, c_upper),
+                (-50.0, 50.0),
+            ],
+        )
+        if best_result is None or result.fun < best_result.fun:
+            best_result = result
+
+    if best_result is None:
+        raise ValueError("threshold_log_mle did not run.")
+    if not np.isfinite(best_result.fun):
+        raise ValueError("threshold_log_mle did not converge to a finite likelihood.")
+
+    a, log_minus_b, c, log_sigma = [float(value) for value in best_result.x]
+    b = -float(np.exp(log_minus_b))
+    sigma = float(np.exp(log_sigma))
+    x = np.log10(response - c)
+    y_hat = a + b * x
+    residual = y - y_hat
+    negative_log_likelihood = float(best_result.fun)
+    log_likelihood = -negative_log_likelihood
+
+    hessian = _numerical_hessian(
+        lambda params: _threshold_log_mle_negative_log_likelihood(params, response, y, failures),
+        best_result.x,
+    )
+    covariance_transformed = np.linalg.pinv(hessian)
+    jacobian_original = np.diag([1.0, b, 1.0, sigma])
+    covariance_original = jacobian_original @ covariance_transformed @ jacobian_original.T
+    covariance_mean = covariance_original[:3, :3]
+    standard_errors = np.sqrt(np.maximum(np.diag(covariance_original), 0.0))
+
+    x_mean = float(np.mean(x))
+    y_mean = float(np.mean(y))
+    x_delta = x - x_mean
+    y_delta = y - y_mean
+    sxx = float(np.sum(x_delta**2))
+    if sxx <= 0:
+        raise ValueError("The threshold-log independent variable has no variation.")
+    sxy = float(np.sum(x_delta * y_delta))
+
+    return {
+        "coefficient_a": a,
+        "coefficient_b": b,
+        "coefficient_c": c,
+        "sigma": sigma,
+        "x": x,
+        "x_mean": x_mean,
+        "sxx": sxx,
+        "sxy": sxy,
+        "y_hat": y_hat,
+        "residual": residual,
+        "covariance": covariance_original,
+        "covariance_mean": covariance_mean,
+        "standard_error_a": float(standard_errors[0]),
+        "standard_error_b": float(standard_errors[1]),
+        "standard_error_c": float(standard_errors[2]),
+        "standard_error_sigma": float(standard_errors[3]),
+        "log_likelihood": log_likelihood,
+        "negative_log_likelihood": negative_log_likelihood,
+        "success": bool(best_result.success),
+        "optimizer_message": str(best_result.message),
+    }
+
+
+def _threshold_log_mle_negative_log_likelihood(
+    parameters: np.ndarray,
+    response: np.ndarray,
+    y: np.ndarray,
+    failure_mask: np.ndarray,
+) -> float:
+    a, log_minus_b, c, log_sigma = [float(value) for value in parameters]
+    if c < 0.0 or c >= float(np.min(response)):
+        return 1e300
+    shifted = response - c
+    if np.any(shifted <= 0.0):
+        return 1e300
+    b = -float(np.exp(log_minus_b))
+    sigma = float(np.exp(log_sigma))
+    if not np.isfinite(sigma) or sigma <= 0.0:
+        return 1e300
+    mu = a + b * np.log10(shifted)
+    failures = np.asarray(failure_mask, dtype=bool)
+    log_likelihood = float(np.sum(stats.norm.logpdf(y[failures], loc=mu[failures], scale=sigma)))
+    if np.any(~failures):
+        z_runout = (y[~failures] - mu[~failures]) / sigma
+        log_likelihood += float(np.sum(stats.norm.logsf(z_runout)))
+    if not np.isfinite(log_likelihood):
+        return 1e300
+    return -log_likelihood
+
+
+def _numerical_hessian(func, parameters: np.ndarray) -> np.ndarray:
+    params = np.asarray(parameters, dtype=float)
+    n = len(params)
+    hessian = np.zeros((n, n), dtype=float)
+    steps = np.maximum(np.abs(params) * 1e-4, 1e-5)
+    f0 = float(func(params))
+    for i in range(n):
+        step_i = steps[i]
+        plus_i = params.copy()
+        minus_i = params.copy()
+        plus_i[i] += step_i
+        minus_i[i] -= step_i
+        f_plus = float(func(plus_i))
+        f_minus = float(func(minus_i))
+        hessian[i, i] = (f_plus - 2.0 * f0 + f_minus) / (step_i**2)
+        for j in range(i + 1, n):
+            step_j = steps[j]
+            pp = params.copy()
+            pm = params.copy()
+            mp = params.copy()
+            mm = params.copy()
+            pp[i] += step_i
+            pp[j] += step_j
+            pm[i] += step_i
+            pm[j] -= step_j
+            mp[i] -= step_i
+            mp[j] += step_j
+            mm[i] -= step_i
+            mm[j] -= step_j
+            hessian_ij = (
+                float(func(pp))
+                - float(func(pm))
+                - float(func(mp))
+                + float(func(mm))
+            ) / (4.0 * step_i * step_j)
+            hessian[i, j] = hessian_ij
+            hessian[j, i] = hessian_ij
+    return hessian
+
+
+def _threshold_log_mle_band_delta(
+    x_grid: np.ndarray,
+    coefficient_b: float,
+    covariance_mean: np.ndarray,
+    simultaneous_band_factor: float,
+) -> np.ndarray:
+    shifted_response = np.power(10.0, x_grid)
+    gradients = np.column_stack(
+        (
+            np.ones_like(x_grid),
+            x_grid,
+            -coefficient_b / (np.log(10.0) * shifted_response),
+        )
+    )
+    variances = np.einsum("ij,jk,ik->i", gradients, covariance_mean, gradients)
+    return simultaneous_band_factor * np.sqrt(np.maximum(variances, 0.0))
+
+
 def _status_is_failure(value: object) -> bool:
     if pd.isna(value):
         return True
@@ -665,6 +977,29 @@ def _linearity_test(
     )
 
 
+def _unavailable_linearity_test(
+    data: pd.DataFrame,
+    level_stats: pd.DataFrame,
+    reason: str,
+) -> E739LinearityTest:
+    return E739LinearityTest(
+        available=False,
+        reason=reason,
+        levels=len(level_stats),
+        specimens=len(data),
+        lack_of_fit_df=None,
+        pure_error_df=None,
+        lack_of_fit_ss=None,
+        pure_error_ss=None,
+        lack_of_fit_ms=None,
+        pure_error_ms=None,
+        f_statistic=None,
+        f_critical=None,
+        p_value=None,
+        reject_linear_model=None,
+    )
+
+
 def _signed(value: float) -> str:
     if value < 0:
         return f"- {abs(value):.6g}"
@@ -677,7 +1012,7 @@ def _x_expression(
     model: E739Model,
     coefficient_c: float | None,
 ) -> str:
-    if model == "shifted-log":
+    if model in ("shifted-log", "threshold_log_mle"):
         return f"log10({_shifted_response_expression(response_column, coefficient_c)})"
     if x_transform == "log":
         return f"log10({response_column})"
@@ -722,7 +1057,7 @@ def _life_response_formula(
     model: E739Model,
     coefficient_c: float | None,
 ) -> str:
-    if model == "shifted-log":
+    if model in ("shifted-log", "threshold_log_mle"):
         return (
             f"{life_column} = {coefficient_a:.6g} * "
             f"({_shifted_response_expression(response_column, coefficient_c)})"
@@ -747,7 +1082,7 @@ def _response_life_formula(
 ) -> str:
     if abs(coefficient_b) < 1e-15:
         return "Response-life form is undefined because B is approximately zero."
-    if model == "shifted-log":
+    if model in ("shifted-log", "threshold_log_mle"):
         response_scale = float(np.power(10.0, -coefficient_a / coefficient_b))
         response_exponent = 1.0 / coefficient_b
         return (
@@ -773,3 +1108,53 @@ def _shifted_response_expression(response_column: str, coefficient_c: float | No
     if coefficient_c < 0:
         return f"{response_column} + {abs(coefficient_c):.6g}"
     return f"{response_column} - {coefficient_c:.6g}"
+
+
+def predict_threshold_log_mle_life(
+    result: E739FitResult,
+    response: float | np.ndarray,
+    failure_probability: float = 0.5,
+) -> float | np.ndarray:
+    """Predict life quantile N_p for the threshold_log_mle model."""
+    _require_threshold_log_mle_result(result)
+    response_array = np.asarray(response, dtype=float)
+    _require_response_above_threshold(response_array, result.coefficient_c)
+    z_value = stats.norm.ppf(float(failure_probability))
+    log_life = (
+        result.coefficient_a
+        + result.coefficient_b * np.log10(response_array - result.coefficient_c)
+        + z_value * result.sigma
+    )
+    predicted = np.power(10.0, log_life)
+    return float(predicted) if np.ndim(response) == 0 else predicted
+
+
+def inverse_threshold_log_mle_response(
+    result: E739FitResult,
+    life: float | np.ndarray,
+    failure_probability: float = 0.5,
+) -> float | np.ndarray:
+    """Back-calculate response S_p(N0) for the threshold_log_mle model."""
+    _require_threshold_log_mle_result(result)
+    life_array = np.asarray(life, dtype=float)
+    if np.any(life_array <= 0.0):
+        raise ValueError("life must be positive.")
+    z_value = stats.norm.ppf(float(failure_probability))
+    response = result.coefficient_c + np.power(
+        10.0,
+        (np.log10(life_array) - result.coefficient_a - z_value * result.sigma)
+        / result.coefficient_b,
+    )
+    return float(response) if np.ndim(life) == 0 else response
+
+
+def _require_threshold_log_mle_result(result: E739FitResult) -> None:
+    if result.model != "threshold_log_mle":
+        raise ValueError("Prediction requires a threshold_log_mle fit result.")
+    if result.coefficient_c is None:
+        raise ValueError("threshold_log_mle result is missing coefficient C.")
+
+
+def _require_response_above_threshold(response: np.ndarray, threshold: float) -> None:
+    if np.any(response <= threshold):
+        raise ValueError("response must be greater than threshold C for prediction.")

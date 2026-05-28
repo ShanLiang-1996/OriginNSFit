@@ -684,7 +684,7 @@ class OriginClient:
         if fit.result.x_transform != "log":
             return fit.result.life_response_formula
         variable = self._response_presentation(fit.result.response_column).formula_variable
-        if fit.result.model == "shifted-log":
+        if fit.result.model in ("shifted-log", "threshold_log_mle"):
             shifted_variable = self._origin_shifted_variable(variable, fit.result.coefficient_c)
             return (
                 f"N\\-(f) = {fit.result.life_response_coefficient_a:.6g} "
@@ -703,7 +703,7 @@ class OriginClient:
         return f"({variable} - {coefficient_c:.6g})"
 
     def _linearized_x_axis_label(self, fit: E739Fit) -> str:
-        if fit.result.model == "shifted-log":
+        if fit.result.model in ("shifted-log", "threshold_log_mle"):
             return "log10(response - C)"
         return "log10(response)" if fit.result.x_transform == "log" else "response"
 

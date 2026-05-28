@@ -55,9 +55,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--e739-model",
-        choices=("standard", "shifted-log"),
+        choices=(
+            "standard",
+            "shifted-log",
+            "threshold_log_mle",
+            "log_threshold_censored_mle",
+        ),
         default="standard",
-        help="E739 model. standard: log10(N)=A+B*X; shifted-log: log10(N)=A+B*log10(response-C).",
+        help=(
+            "E739 model. standard: log10(N)=A+B*X; shifted-log: "
+            "log10(N)=A+B*log10(response-C); threshold_log_mle handles run-out "
+            "rows as right-censored observations."
+        ),
     )
     parser.add_argument(
         "--confidence",
@@ -67,7 +76,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--status",
-        help="Optional status column. Run-out/suspended rows are excluded with a warning.",
+        help=(
+            "Optional status column. Standard E739 excludes run-out/suspended rows; "
+            "threshold_log_mle treats them as right-censored observations."
+        ),
     )
     parser.add_argument(
         "--level",
@@ -356,8 +368,11 @@ def _e739_summary_record(
         "analysis": (
             "ASTM E739 linearized OLS"
             if result.model == "standard"
+            else "Threshold-log censored maximum likelihood"
+            if result.model == "threshold_log_mle"
             else "Shifted-log nonlinear least squares"
         ),
+        "model_name": result.model_name,
         "model": result.model,
         "life_column": life_column,
         "response_column": response_column,
@@ -369,12 +384,15 @@ def _e739_summary_record(
         "coefficient_a": result.coefficient_a,
         "coefficient_b": result.coefficient_b,
         "coefficient_c": result.coefficient_c,
+        "threshold": result.threshold,
         "coefficient_a_lower": result.coefficient_a_lower,
         "coefficient_a_upper": result.coefficient_a_upper,
         "coefficient_b_lower": result.coefficient_b_lower,
         "coefficient_b_upper": result.coefficient_b_upper,
         "coefficient_c_lower": result.coefficient_c_lower,
         "coefficient_c_upper": result.coefficient_c_upper,
+        "sigma_lower": result.sigma_lower,
+        "sigma_upper": result.sigma_upper,
         "standard_error_a": result.standard_error_a,
         "standard_error_b": result.standard_error_b,
         "standard_error_c": result.standard_error_c,
@@ -399,6 +417,12 @@ def _e739_summary_record(
         "replication_percent": result.replication_percent,
         "life_response_coefficient_a": result.life_response_coefficient_a,
         "life_response_coefficient_b": result.life_response_coefficient_b,
+        "log_likelihood": result.log_likelihood,
+        "negative_log_likelihood": result.negative_log_likelihood,
+        "n_failure": result.n_failure,
+        "n_runout": result.n_runout,
+        "success": result.success,
+        "optimizer_message": result.optimizer_message,
         "linearity_available": linearity.available,
         "linearity_reason": linearity.reason,
         "linearity_levels": linearity.levels,
