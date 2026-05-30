@@ -572,31 +572,41 @@ def _prepare_runout_data(
 
     prepared = runout_data.copy()
     before_domain_rows = len(prepared)
-    domain_mask = prepared["e739_life"] > 0
-    if model in ("shifted-log", "threshold_log_mle"):
-        if coefficient_c is None:
-            return prepared.iloc[0:0].copy()
-        domain_mask &= prepared["e739_response"] > coefficient_c
-    elif x_transform == "log":
-        domain_mask &= prepared["e739_response"] > 0
+    plot_mask = prepared["e739_life"] > 0
+    if x_transform == "log" or model in ("shifted-log", "threshold_log_mle"):
+        plot_mask &= prepared["e739_response"] > 0
 
-    prepared = prepared[domain_mask].copy()
+    prepared = prepared[plot_mask].copy()
     dropped = before_domain_rows - len(prepared)
     if dropped:
         warnings.append(
-            f"Dropped {dropped} run-out row(s) outside the positive/model domain for plotting."
+            f"Dropped {dropped} run-out row(s) outside the positive plotting domain."
         )
     if prepared.empty:
         return prepared
 
     response = prepared["e739_response"].to_numpy(dtype=float)
     y = np.log10(prepared["e739_life"].to_numpy(dtype=float))
+    x = np.full(len(prepared), np.nan, dtype=float)
     if model in ("shifted-log", "threshold_log_mle"):
-        x = np.log10(response - float(coefficient_c))
+        if coefficient_c is not None:
+            transform_mask = response > float(coefficient_c)
+            x[transform_mask] = np.log10(response[transform_mask] - float(coefficient_c))
+        else:
+            transform_mask = np.zeros(len(prepared), dtype=bool)
     elif x_transform == "log":
-        x = np.log10(response)
+        transform_mask = response > 0
+        x[transform_mask] = np.log10(response[transform_mask])
     else:
+        transform_mask = np.ones(len(prepared), dtype=bool)
         x = response
+
+    invalid_transform = int(len(prepared) - np.sum(transform_mask))
+    if invalid_transform:
+        warnings.append(
+            f"Retained {invalid_transform} run-out row(s) for engineering plots, but left "
+            "linearized coordinates blank because they are outside the model transform domain."
+        )
     y_hat = coefficient_a + coefficient_b * x
     residual = y - y_hat
 

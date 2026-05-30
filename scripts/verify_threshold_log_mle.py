@@ -45,6 +45,29 @@ def _check_log_likelihood_uses_logsf(fit) -> None:
     assert abs(log_likelihood - result.log_likelihood) < 1e-8
 
 
+def _check_shifted_log_runout_outside_transform_domain() -> None:
+    response = np.array([0.0050, 0.0055, 0.0060, 0.0065, 0.0070, 0.0080, 0.0090, 0.0100])
+    intercept = 0.2
+    slope = -1.5
+    threshold = 0.0044
+    life = np.power(10.0, intercept + slope * np.log10(response - threshold))
+    frame = pd.DataFrame(
+        {
+            "S": [*response, 0.0030],
+            "N": [*life, 1_200_000.0],
+            "status": ["failure"] * len(response) + ["runout"],
+        }
+    )
+
+    fit = fit_e739(frame, "N", "S", model="shifted-log", status_column="status")
+    assert fit.result.n_runout == 1
+    assert fit.runout_data is not None
+    assert len(fit.runout_data) == 1
+    assert float(fit.runout_data.loc[0, "e739_response"]) < float(fit.result.coefficient_c)
+    assert np.isnan(float(fit.runout_data.loc[0, "e739_x"]))
+    assert float(fit.curve["life_fit"].max()) >= 1_200_000.0
+
+
 def main_verify() -> None:
     failure_only = _synthetic_data(with_runout=False)
     default_fit = fit_e739(failure_only, "N", "S")
@@ -178,6 +201,8 @@ def main_verify() -> None:
         assert len(runout_export) == runout_count
         assert "e739_is_failure" in runout_export.columns
         assert not bool(runout_export["e739_is_failure"].astype(bool).any())
+
+    _check_shifted_log_runout_outside_transform_domain()
 
     print("E739 run-out and threshold_log_mle verification passed")
 
